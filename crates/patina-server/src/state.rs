@@ -16,19 +16,31 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 /// Builds a provider for a profile and its resolved key. Tests swap in a mock.
-pub type ProviderFactory =
-    Arc<dyn Fn(&ProviderProfile, Option<String>) -> Result<Arc<dyn ChatProvider>, ProviderError> + Send + Sync>;
+pub type ProviderFactory = Arc<
+    dyn Fn(&ProviderProfile, Option<String>) -> Result<Arc<dyn ChatProvider>, ProviderError>
+        + Send
+        + Sync,
+>;
 
 pub fn genai_factory() -> ProviderFactory {
-    Arc::new(|profile, key| Ok(Arc::new(GenaiProvider::new(profile, key)?) as Arc<dyn ChatProvider>))
+    Arc::new(
+        |profile, key| Ok(Arc::new(GenaiProvider::new(profile, key)?) as Arc<dyn ChatProvider>),
+    )
 }
+
+/// A profile and the guarded provider built from it.
+type CachedProvider = (ProviderProfile, Arc<dyn ChatProvider>);
 
 /// A message to run followers: a persisted event, or a live text delta that is not persisted.
 #[derive(Debug, Clone)]
 pub enum Live {
     Event(Event),
     /// `after_seq` is the last persisted sequence number when the delta was produced.
-    Delta { agent_id: String, text: String, after_seq: i64 },
+    Delta {
+        agent_id: String,
+        text: String,
+        after_seq: i64,
+    },
 }
 
 pub struct RunHandle {
@@ -45,11 +57,17 @@ pub struct AppState {
     pub limiter: Mutex<Limiter>,
     pub runs: Mutex<HashMap<String, Arc<RunHandle>>>,
     providers: Mutex<Option<(SystemTime, ProvidersFile)>>,
-    registry: Mutex<HashMap<String, (ProviderProfile, Arc<dyn ChatProvider>)>>,
+    registry: Mutex<HashMap<String, CachedProvider>>,
 }
 
 impl AppState {
-    pub fn new(paths: Paths, config: Config, db: Db, secrets: Secrets, factory: ProviderFactory) -> Arc<AppState> {
+    pub fn new(
+        paths: Paths,
+        config: Config,
+        db: Db,
+        secrets: Secrets,
+        factory: ProviderFactory,
+    ) -> Arc<AppState> {
         Arc::new(AppState {
             paths,
             config,
@@ -72,13 +90,14 @@ impl AppState {
         let path = self.providers_path();
         let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
         let mut cache = self.providers.lock().unwrap();
-        if let (Some((cached_at, f)), Some(m)) = (cache.as_ref(), mtime) {
-            if *cached_at == m {
-                return Ok(f.clone());
-            }
+        if let (Some((cached_at, f)), Some(m)) = (cache.as_ref(), mtime)
+            && *cached_at == m
+        {
+            return Ok(f.clone());
         }
         let file = match std::fs::read_to_string(&path) {
-            Ok(t) => ProvidersFile::parse(&t).map_err(|e| ApiError::bad_request(format!("providers.toml: {e}")))?,
+            Ok(t) => ProvidersFile::parse(&t)
+                .map_err(|e| ApiError::bad_request(format!("providers.toml: {e}")))?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => ProvidersFile::default(),
             Err(e) => return Err(ApiError::internal(e)),
         };
@@ -89,7 +108,8 @@ impl AppState {
     }
 
     pub fn save_providers(&self, file: &ProvidersFile) -> ApiResult<()> {
-        file.validate().map_err(|e| ApiError::bad_request(e.to_string()))?;
+        file.validate()
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
         let text = file.to_toml().map_err(ApiError::internal)?;
         write_atomic(&self.providers_path(), &text).map_err(ApiError::internal)?;
         *self.providers.lock().unwrap() = None;
@@ -105,8 +125,12 @@ impl AppState {
     pub async fn resolve_key(&self, profile: &ProviderProfile) -> ApiResult<Option<String>> {
         match profile.api_key_ref.as_deref() {
             None => Ok(None),
-            Some(r) if r.starts_with("secret:") => Ok(self.secrets.get(&r["secret:".len()..]).await?),
-            Some(r) => Ok(std::env::var(&r["env:".len()..]).ok().filter(|v| !v.is_empty())),
+            Some(r) if r.starts_with("secret:") => {
+                Ok(self.secrets.get(&r["secret:".len()..]).await?)
+            }
+            Some(r) => Ok(std::env::var(&r["env:".len()..])
+                .ok()
+                .filter(|v| !v.is_empty())),
         }
     }
 
@@ -117,16 +141,23 @@ impl AppState {
             .get(id)
             .cloned()
             .ok_or_else(|| ApiError::bad_request(format!("provider {id:?} does not exist")))?;
-        if let Some((p, prov)) = self.registry.lock().unwrap().get(id) {
-            if *p == profile {
-                return Ok((profile, prov.clone()));
-            }
+        if let Some((p, prov)) = self.registry.lock().unwrap().get(id)
+            && *p == profile
+        {
+            return Ok((profile, prov.clone()));
         }
         let key = self.resolve_key(&profile).await?;
-        let inner = (self.factory)(&profile, key).map_err(|e| ApiError::bad_request(e.to_string()))?;
-        let guarded: Arc<dyn ChatProvider> =
-            Arc::new(Guarded::new(inner, profile.max_concurrency, Duration::from_secs(profile.idle_timeout_s)));
-        self.registry.lock().unwrap().insert(id.to_string(), (profile.clone(), guarded.clone()));
+        let inner =
+            (self.factory)(&profile, key).map_err(|e| ApiError::bad_request(e.to_string()))?;
+        let guarded: Arc<dyn ChatProvider> = Arc::new(Guarded::new(
+            inner,
+            profile.max_concurrency,
+            Duration::from_secs(profile.idle_timeout_s),
+        ));
+        self.registry
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), (profile.clone(), guarded.clone()));
         Ok((profile, guarded))
     }
 
@@ -146,9 +177,14 @@ impl AppState {
             if path.extension().and_then(|e| e.to_str()) != Some("toml") {
                 continue;
             }
-            match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| AgentConfig::parse(&t)) {
+            match std::fs::read_to_string(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|t| AgentConfig::parse(&t))
+            {
                 Ok(a) => out.push(a),
-                Err(e) => tracing::warn!(file = %path.display(), error = %e, "skipping invalid agent file"),
+                Err(e) => {
+                    tracing::warn!(file = %path.display(), error = %e, "skipping invalid agent file")
+                }
             }
         }
         out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -163,7 +199,8 @@ impl AppState {
         a.validate().map_err(ApiError::bad_request)?;
         std::fs::create_dir_all(self.agents_dir()).map_err(ApiError::internal)?;
         let text = a.to_toml().map_err(ApiError::internal)?;
-        write_atomic(&self.agents_dir().join(format!("{}.toml", a.id)), &text).map_err(ApiError::internal)
+        write_atomic(&self.agents_dir().join(format!("{}.toml", a.id)), &text)
+            .map_err(ApiError::internal)
     }
 
     pub fn delete_agent(&self, id: &str) -> ApiResult<bool> {

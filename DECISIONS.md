@@ -21,3 +21,32 @@
 - directories: platform config and data paths.
 - thiserror and anyhow: error types.
 - tempfile (dev only): test folders.
+
+## M1 choices
+- **Run without a team:** teams arrive in M5, so `POST /runs` takes `agent_id`. The `team_id` column stores `agent:<id>` until then.
+- **One model turn per run** in M1. The loop gains tools in M2 and steering messages in M4.
+- **Tool calls from genai arrive whole** at the end of a turn (genai's `capture_tool_calls`), and are emitted as start, one args delta, end. The trait still supports incremental deltas. Revisit if live tool-argument streaming matters.
+- **Reasoning parts** are streamed as `reasoning` events but not yet replayed to the provider. Replay is needed only once tool turns exist (M2).
+- **Model listing uses plain HTTP**, not genai: genai's list is a static table for most providers.
+- **Retries live in the agent loop**, not the provider, so each retry is recorded in the event log. A failed attempt's text stays in the log, tagged with its attempt number, and the UI hides it.
+- **`Secure` cookie flag** is set from `X-Forwarded-Proto: https`, since there is no built-in TLS.
+- **Origin check** compares the `Origin` authority with the `Host` header, which is already checked against `allowed_hosts`.
+- **Minimum password length** is 10 characters.
+- **Markdown rendering is deferred to M6.** Model output is shown as plain text until then, which section 13 allows.
+- **Extra route** `GET /provider-presets` serves the editable-preset list to the UI.
+- **`ui/dist` is not committed.** `patina-server/build.rs` writes a "UI not built" page if it is missing, so `cargo build` works on a fresh clone.
+- **On shutdown, running runs are cancelled.** Marking them `interrupted` and resuming is M4.
+- **Database access** goes through one writer thread that owns the only connection; reads use it too. Simple, and fast enough for one owner.
+
+## M1 dependencies (stripped release binary: 8.7 MB, up from 3.0 MB)
+- genai 0.7: provider protocols. With reqwest and rustls (aws-lc-rs), the bulk of the 5.7 MB growth.
+- reqwest 0.13 (rustls): already pulled in by genai; used directly for model listing.
+- argon2, chacha20poly1305, sha2, getrandom: password hashing, secret encryption, token hashing, randomness. Small.
+- async-trait, futures, tokio-util: the provider trait, streams, cancellation. Small.
+- serde_json, uuid (v7): payloads and time-sorted ids. Small.
+- ts-rs: generates the UI's API types. Derive only; no measurable size.
+- UI: preact, @preact/signals. Dev only: vite, typescript, vitest, @playwright/test, @types/node.
+
+## Open risks
+- rustls uses aws-lc-rs, which needs a C toolchain when cross-compiling. Check static musl builds early in M8, and switch to the ring provider if needed.
+- Live checks against real hosted providers have not been run (they need the owner's keys).

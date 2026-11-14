@@ -22,11 +22,21 @@ pub struct SinkError(pub String);
 #[async_trait]
 pub trait EventSink: Send + Sync {
     /// Persist an event and broadcast it. Returns its sequence number.
-    async fn append(&self, agent_id: Option<&str>, kind: EventType, payload: Value) -> Result<i64, SinkError>;
+    async fn append(
+        &self,
+        agent_id: Option<&str>,
+        kind: EventType,
+        payload: Value,
+    ) -> Result<i64, SinkError>;
     /// Broadcast a text delta to live followers without persisting it.
     fn live_delta(&self, agent_id: &str, text: &str);
     /// Persist one message of the agent's own context.
-    async fn save_message(&self, agent_id: &str, idx: i64, message: &Message) -> Result<(), SinkError>;
+    async fn save_message(
+        &self,
+        agent_id: &str,
+        idx: i64,
+        message: &Message,
+    ) -> Result<(), SinkError>;
 }
 
 #[derive(Debug, Clone)]
@@ -87,8 +97,12 @@ async fn run_inner(
     cancel: &CancellationToken,
 ) -> Result<Outcome, SinkError> {
     let agent = Some(spec.id.as_str());
-    sink.append(agent, EventType::AgentStarted, json!({"name": spec.name, "provider": spec.provider_id, "model": spec.model}))
-        .await?;
+    sink.append(
+        agent,
+        EventType::AgentStarted,
+        json!({"name": spec.name, "provider": spec.provider_id, "model": spec.model}),
+    )
+    .await?;
     let mut attempt = 0u32;
     let turn = loop {
         let req = ChatRequest {
@@ -123,7 +137,12 @@ async fn run_inner(
                 attempt += 1;
             }
             Err(e) => {
-                sink.append(agent, EventType::Error, json!({"message": e.to_string(), "retrying": false})).await?;
+                sink.append(
+                    agent,
+                    EventType::Error,
+                    json!({"message": e.to_string(), "retrying": false}),
+                )
+                .await?;
                 return finish(sink, agent, Outcome::Failed(e.to_string())).await;
             }
         }
@@ -153,21 +172,34 @@ async fn run_inner(
         parts.push(Part::Text(turn.text));
     }
     for (id, name, args) in turn.tool_calls {
-        parts.push(Part::ToolCall { id, name, args: serde_json::from_str(&args).unwrap_or(Value::Null) });
+        parts.push(Part::ToolCall {
+            id,
+            name,
+            args: serde_json::from_str(&args).unwrap_or(Value::Null),
+        });
     }
-    let msg = Message { role: Role::Assistant, parts };
-    sink.save_message(&spec.id, history.len() as i64, &msg).await?;
+    let msg = Message {
+        role: Role::Assistant,
+        parts,
+    };
+    sink.save_message(&spec.id, history.len() as i64, &msg)
+        .await?;
     history.push(msg);
     finish(sink, agent, Outcome::Completed).await
 }
 
-async fn finish(sink: &dyn EventSink, agent: Option<&str>, o: Outcome) -> Result<Outcome, SinkError> {
+async fn finish(
+    sink: &dyn EventSink,
+    agent: Option<&str>,
+    o: Outcome,
+) -> Result<Outcome, SinkError> {
     let status = match &o {
         Outcome::Completed => "completed",
         Outcome::Cancelled => "cancelled",
         Outcome::Failed(_) => "failed",
     };
-    sink.append(agent, EventType::AgentFinished, json!({"status": status})).await?;
+    sink.append(agent, EventType::AgentFinished, json!({"status": status}))
+        .await?;
     Ok(o)
 }
 
@@ -185,7 +217,12 @@ async fn one_attempt(
         Ok(s) => s,
         Err(e) => return Ok(Err(e)),
     };
-    let mut turn = Turn { text: String::new(), reasoning: String::new(), tool_calls: vec![], usage: None };
+    let mut turn = Turn {
+        text: String::new(),
+        reasoning: String::new(),
+        tool_calls: vec![],
+        usage: None,
+    };
     let mut pending_text = String::new();
     let mut pending_reasoning = String::new();
     let mut ticker = tokio::time::interval(FLUSH_INTERVAL);
@@ -253,7 +290,12 @@ mod tests {
 
     #[async_trait]
     impl EventSink for Memory {
-        async fn append(&self, _: Option<&str>, kind: EventType, payload: Value) -> Result<i64, SinkError> {
+        async fn append(
+            &self,
+            _: Option<&str>,
+            kind: EventType,
+            payload: Value,
+        ) -> Result<i64, SinkError> {
             let mut e = self.events.lock().unwrap();
             e.push((kind.as_str().to_string(), payload));
             Ok(e.len() as i64)
@@ -277,7 +319,10 @@ mod tests {
             &self,
             _: ChatRequest,
             _: CancellationToken,
-        ) -> Result<futures::stream::BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
+        ) -> Result<
+            futures::stream::BoxStream<'static, Result<StreamEvent, ProviderError>>,
+            ProviderError,
+        > {
             let mut f = self.fail.lock().unwrap();
             if *f > 0 {
                 *f -= 1;
@@ -309,7 +354,12 @@ mod tests {
     }
 
     fn kinds(m: &Memory) -> Vec<String> {
-        m.events.lock().unwrap().iter().map(|e| e.0.clone()).collect()
+        m.events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| e.0.clone())
+            .collect()
     }
 
     #[test]
@@ -321,7 +371,13 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn midstream_failure_is_discarded_logged_and_retried() {
         let sink = Memory::default();
-        let p = Arc::new(Flaky { fail: Mutex::new(1), err: ProviderError::Transient { message: "boom".into(), retry_after: None } });
+        let p = Arc::new(Flaky {
+            fail: Mutex::new(1),
+            err: ProviderError::Transient {
+                message: "boom".into(),
+                retry_after: None,
+            },
+        });
         let mut h = vec![Message::user("hi")];
         let out = run_agent(&spec(), p, &sink, &mut h, CancellationToken::new()).await;
         assert_eq!(out, Outcome::Completed);
@@ -329,8 +385,20 @@ mod tests {
         let retry = ev.iter().find(|e| e.0 == "error").expect("retry is logged");
         assert_eq!(retry.1["retrying"], true);
         // The partial text carries attempt 0; the final text carries attempt 1.
-        let texts: Vec<_> = ev.iter().filter(|e| e.0 == "text").map(|e| (e.1["text"].as_str().unwrap().to_string(), e.1["attempt"].as_u64().unwrap())).collect();
-        assert_eq!(texts, vec![("partial".to_string(), 0), ("ok".to_string(), 1)]);
+        let texts: Vec<_> = ev
+            .iter()
+            .filter(|e| e.0 == "text")
+            .map(|e| {
+                (
+                    e.1["text"].as_str().unwrap().to_string(),
+                    e.1["attempt"].as_u64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            vec![("partial".to_string(), 0), ("ok".to_string(), 1)]
+        );
         // Only the successful attempt enters the agent's context.
         assert_eq!(h.len(), 2);
         assert!(matches!(&h[1].parts[0], Part::Text(t) if t == "ok"));
@@ -340,24 +408,39 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn fatal_errors_fail_without_retry_and_retries_are_bounded() {
         let sink = Memory::default();
-        let p = Arc::new(Flaky { fail: Mutex::new(9), err: ProviderError::Fatal("bad key".into()) });
+        let p = Arc::new(Flaky {
+            fail: Mutex::new(9),
+            err: ProviderError::Fatal("bad key".into()),
+        });
         let mut h = vec![Message::user("hi")];
         let out = run_agent(&spec(), p, &sink, &mut h, CancellationToken::new()).await;
         assert!(matches!(out, Outcome::Failed(_)));
         assert_eq!(kinds(&sink).iter().filter(|k| *k == "error").count(), 1);
 
         let sink = Memory::default();
-        let p = Arc::new(Flaky { fail: Mutex::new(99), err: ProviderError::Transient { message: "x".into(), retry_after: None } });
+        let p = Arc::new(Flaky {
+            fail: Mutex::new(99),
+            err: ProviderError::Transient {
+                message: "x".into(),
+                retry_after: None,
+            },
+        });
         let out = run_agent(&spec(), p, &sink, &mut h, CancellationToken::new()).await;
         assert!(matches!(out, Outcome::Failed(_)));
         // 5 retries, then the final failure.
-        assert_eq!(kinds(&sink).iter().filter(|k| *k == "error").count(), MAX_RETRIES as usize + 1);
+        assert_eq!(
+            kinds(&sink).iter().filter(|k| *k == "error").count(),
+            MAX_RETRIES as usize + 1
+        );
     }
 
     #[tokio::test(start_paused = true)]
     async fn missing_usage_is_estimated_and_marked() {
         let sink = Memory::default();
-        let p = Arc::new(Flaky { fail: Mutex::new(0), err: ProviderError::Cancelled });
+        let p = Arc::new(Flaky {
+            fail: Mutex::new(0),
+            err: ProviderError::Cancelled,
+        });
         let mut h = vec![Message::user("12345678")];
         run_agent(&spec(), p, &sink, &mut h, CancellationToken::new()).await;
         let ev = sink.events.lock().unwrap().clone();

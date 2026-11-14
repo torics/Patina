@@ -16,10 +16,13 @@ pub fn to_hex(b: &[u8]) -> String {
 
 pub fn from_hex(s: &str) -> Option<Vec<u8>> {
     let s = s.trim();
-    if s.len() % 2 != 0 || !s.is_ascii() {
+    if !s.len().is_multiple_of(2) || !s.is_ascii() {
         return None;
     }
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok()).collect()
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
 }
 
 pub fn random_bytes<const N: usize>() -> [u8; N] {
@@ -31,7 +34,11 @@ pub fn random_bytes<const N: usize>() -> [u8; N] {
 fn parse_key(hex: &str, origin: &str) -> Result<[u8; 32], StoreError> {
     from_hex(hex)
         .and_then(|v| <[u8; 32]>::try_from(v).ok())
-        .ok_or_else(|| StoreError::Other(format!("{origin} must hold a 32-byte key as 64 hex characters")))
+        .ok_or_else(|| {
+            StoreError::Other(format!(
+                "{origin} must hold a 32-byte key as 64 hex characters"
+            ))
+        })
 }
 
 /// The single place the master key is found. A keyring source can be added here later.
@@ -45,10 +52,14 @@ pub fn master_key(data_dir: &Path) -> Result<[u8; 32], StoreError> {
         Ok(t) => parse_key(&t, &path.display().to_string()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let key = random_bytes::<32>();
-            write_private(&path, to_hex(&key).as_bytes()).map_err(|e| StoreError::Other(format!("cannot write {}: {e}", path.display())))?;
+            write_private(&path, to_hex(&key).as_bytes())
+                .map_err(|e| StoreError::Other(format!("cannot write {}: {e}", path.display())))?;
             Ok(key)
         }
-        Err(e) => Err(StoreError::Other(format!("cannot read {}: {e}", path.display()))),
+        Err(e) => Err(StoreError::Other(format!(
+            "cannot read {}: {e}",
+            path.display()
+        ))),
     }
 }
 
@@ -83,17 +94,34 @@ impl Secrets {
         let nonce = random_bytes::<24>();
         let ct = self
             .cipher()
-            .encrypt(&XNonce::from(nonce), Payload { msg: plaintext.as_bytes(), aad: name.as_bytes() })
+            .encrypt(
+                &XNonce::from(nonce),
+                Payload {
+                    msg: plaintext.as_bytes(),
+                    aad: name.as_bytes(),
+                },
+            )
             .map_err(|_| StoreError::Other("encryption failed".into()))?;
         Ok((nonce, ct))
     }
 
     pub fn open_sealed(&self, name: &str, nonce: &[u8], ct: &[u8]) -> Result<String, StoreError> {
-        let nonce = XNonce::try_from(nonce).map_err(|_| StoreError::Other("stored secret is corrupt".into()))?;
+        let nonce = XNonce::try_from(nonce)
+            .map_err(|_| StoreError::Other("stored secret is corrupt".into()))?;
         let pt = self
             .cipher()
-            .decrypt(&nonce, Payload { msg: ct, aad: name.as_bytes() })
-            .map_err(|_| StoreError::Other(format!("cannot decrypt secret {name:?}: wrong master key or corrupt data")))?;
+            .decrypt(
+                &nonce,
+                Payload {
+                    msg: ct,
+                    aad: name.as_bytes(),
+                },
+            )
+            .map_err(|_| {
+                StoreError::Other(format!(
+                    "cannot decrypt secret {name:?}: wrong master key or corrupt data"
+                ))
+            })?;
         String::from_utf8(pt).map_err(|_| StoreError::Other("stored secret is not text".into()))
     }
 
@@ -162,7 +190,10 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let s = secrets(t.path()).await;
         s.put("openai", "sk-secret-value-1234").await.unwrap();
-        assert_eq!(s.get("openai").await.unwrap().as_deref(), Some("sk-secret-value-1234"));
+        assert_eq!(
+            s.get("openai").await.unwrap().as_deref(),
+            Some("sk-secret-value-1234")
+        );
         assert_eq!(s.hint("openai").await.unwrap().as_deref(), Some("1234"));
         assert_eq!(s.get("missing").await.unwrap(), None);
         // The stored bytes never contain the plaintext.
@@ -178,9 +209,15 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let s = secrets(t.path()).await;
         let (n, ct) = s.seal("a", "value").unwrap();
-        assert!(s.open_sealed("b", &n, &ct).is_err(), "renamed secret must not decrypt");
+        assert!(
+            s.open_sealed("b", &n, &ct).is_err(),
+            "renamed secret must not decrypt"
+        );
         let other = Secrets::new(s.db.clone(), [8u8; 32]);
-        assert!(other.open_sealed("a", &n, &ct).is_err(), "wrong master key must not decrypt");
+        assert!(
+            other.open_sealed("a", &n, &ct).is_err(),
+            "wrong master key must not decrypt"
+        );
     }
 
     #[tokio::test]
@@ -203,7 +240,11 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(t.path().join(KEY_FILE)).unwrap().permissions().mode() & 0o777;
+            let mode = std::fs::metadata(t.path().join(KEY_FILE))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
             assert_eq!(mode, 0o600);
         }
     }

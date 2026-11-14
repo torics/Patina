@@ -30,7 +30,10 @@ impl Script {
             cached_tokens: 0,
         }));
         events.push(Ok(StreamEvent::Stop(StopReason::EndTurn)));
-        Script { events, ..Script::default() }
+        Script {
+            events,
+            ..Script::default()
+        }
     }
 
     pub fn with_delay(mut self, d: Duration) -> Script {
@@ -39,7 +42,10 @@ impl Script {
     }
 
     pub fn failing_open(err: ProviderError) -> Script {
-        Script { open_error: Some(err), ..Script::default() }
+        Script {
+            open_error: Some(err),
+            ..Script::default()
+        }
     }
 }
 
@@ -51,7 +57,10 @@ pub struct MockProvider {
 
 impl MockProvider {
     pub fn new(scripts: Vec<Script>) -> MockProvider {
-        MockProvider { scripts: Mutex::new(scripts.into()), requests: Mutex::default() }
+        MockProvider {
+            scripts: Mutex::new(scripts.into()),
+            requests: Mutex::default(),
+        }
     }
 
     /// Every request received so far, oldest first.
@@ -68,12 +77,9 @@ impl ChatProvider for MockProvider {
         cancel: CancellationToken,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
         self.requests.lock().unwrap().push(req);
-        let script = self
-            .scripts
-            .lock()
-            .unwrap()
-            .pop_front()
-            .ok_or_else(|| ProviderError::Fatal("mock provider has no scripted turn left".into()))?;
+        let script = self.scripts.lock().unwrap().pop_front().ok_or_else(|| {
+            ProviderError::Fatal("mock provider has no scripted turn left".into())
+        })?;
         if let Some(e) = script.open_error {
             return Err(e);
         }

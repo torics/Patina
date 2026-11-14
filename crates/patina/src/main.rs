@@ -60,12 +60,17 @@ async fn main() -> Result<()> {
             println!("patina {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        Command::ResetPassword { config_dir, data_dir } => {
+        Command::ResetPassword {
+            config_dir,
+            data_dir,
+        } => {
             let paths = open_paths(config_dir, data_dir)?;
             let db = patina_store::Db::open(&paths.database_file())?;
             let token = patina_server::reset_password(&db).await?;
             println!("Password cleared and all sessions signed out.\nSetup token: {token}");
-            println!("If the daemon is running, open it in a browser and enter this token to set a new password.");
+            println!(
+                "If the daemon is running, open it in a browser and enter this token to set a new password."
+            );
             Ok(())
         }
         Command::Serve {
@@ -84,7 +89,9 @@ async fn main() -> Result<()> {
 fn open_paths(config_dir: Option<PathBuf>, data_dir: Option<PathBuf>) -> Result<Paths> {
     let paths = Paths::resolve(config_dir.as_deref(), data_dir.as_deref())
         .context("cannot determine config and data folders; pass --config-dir and --data-dir")?;
-    paths.ensure().context("cannot create config or data folder")?;
+    paths
+        .ensure()
+        .context("cannot create config or data folder")?;
     Ok(paths)
 }
 
@@ -102,7 +109,10 @@ async fn serve(
 
     let ip: IpAddr = match bind {
         Some(ip) => ip,
-        None => cfg.bind.parse().with_context(|| format!("invalid bind address {:?}", cfg.bind))?,
+        None => cfg
+            .bind
+            .parse()
+            .with_context(|| format!("invalid bind address {:?}", cfg.bind))?,
     };
     let addr = SocketAddr::new(ip, port.unwrap_or(cfg.port));
     if !ip.is_loopback() {
@@ -110,17 +120,32 @@ async fn serve(
         if !patina_server::has_password(&db).await? {
             anyhow::bail!("refusing to bind {ip}: set the owner password on localhost first");
         }
-        let listed = cfg.allowed_hosts.iter().any(|h| !matches!(h.as_str(), "localhost" | "127.0.0.1" | "[::1]"));
+        let listed = cfg
+            .allowed_hosts
+            .iter()
+            .any(|h| !matches!(h.as_str(), "localhost" | "127.0.0.1" | "[::1]"));
         if !listed {
-            anyhow::bail!("refusing to bind {ip}: add the host name clients will use to allowed_hosts in config.toml");
+            anyhow::bail!(
+                "refusing to bind {ip}: add the host name clients will use to allowed_hosts in config.toml"
+            );
         }
     }
     let setup_token = patina_server::ensure_setup_token(&db).await?;
-    let state = patina_server::state::AppState::new(paths, cfg, db, secrets, patina_server::genai_factory());
-    let listener = patina_server::bind(addr).await.with_context(|| format!("cannot bind {addr}"))?;
+    let state = patina_server::state::AppState::new(
+        paths,
+        cfg,
+        db,
+        secrets,
+        patina_server::genai_factory(),
+    );
+    let listener = patina_server::bind(addr)
+        .await
+        .with_context(|| format!("cannot bind {addr}"))?;
     println!("Patina is running at http://{}", listener.local_addr()?);
     if let Some(t) = setup_token {
-        println!("First run: open that address and enter this one-time setup token to set your password:\n  {t}");
+        println!(
+            "First run: open that address and enter this one-time setup token to set your password:\n  {t}"
+        );
     }
     patina_server::serve(listener, state, shutdown_signal()).await?;
     Ok(())

@@ -7,7 +7,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
 /// Serve one canned response per connection, recording each request's text.
-async fn fake_server(responses: Vec<String>) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+async fn fake_server(
+    responses: Vec<String>,
+) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
     let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -24,7 +26,11 @@ async fn fake_server(responses: Vec<String>) -> (u16, std::sync::Arc<std::sync::
                 if let Some(i) = text.find("\r\n\r\n") {
                     let len = text[..i]
                         .lines()
-                        .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap()))
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap())
+                        })
                         .unwrap_or(0);
                     if buf.len() >= i + 4 + len {
                         break;
@@ -34,7 +40,10 @@ async fn fake_server(responses: Vec<String>) -> (u16, std::sync::Arc<std::sync::
                     break;
                 }
             }
-            seen2.lock().unwrap().push(String::from_utf8_lossy(&buf).to_string());
+            seen2
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&buf).to_string());
             s.write_all(resp.as_bytes()).await.unwrap();
             s.shutdown().await.ok();
         }
@@ -43,7 +52,11 @@ async fn fake_server(responses: Vec<String>) -> (u16, std::sync::Arc<std::sync::
 }
 
 fn sse(chunks: &[&str]) -> String {
-    let body: String = chunks.iter().map(|c| format!("data: {c}\n\n")).collect::<String>() + "data: [DONE]\n\n";
+    let body: String = chunks
+        .iter()
+        .map(|c| format!("data: {c}\n\n"))
+        .collect::<String>()
+        + "data: [DONE]\n\n";
     format!("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{body}")
 }
 
@@ -83,24 +96,56 @@ fn request(tools: bool) -> ChatRequest {
 async fn first_error(p: &GenaiProvider, req: ChatRequest) -> ProviderError {
     match p.stream(req, CancellationToken::new()).await {
         Err(e) => e,
-        Ok(mut s) => s.next().await.expect("stream ended without an error").expect_err("expected an error item"),
+        Ok(mut s) => s
+            .next()
+            .await
+            .expect("stream ended without an error")
+            .expect_err("expected an error item"),
     }
 }
 
 async fn collect(p: &GenaiProvider, req: ChatRequest) -> Vec<Result<StreamEvent, ProviderError>> {
-    p.stream(req, CancellationToken::new()).await.unwrap().collect().await
+    p.stream(req, CancellationToken::new())
+        .await
+        .unwrap()
+        .collect()
+        .await
 }
 
 #[tokio::test]
 async fn streams_text_and_usage() {
-    let chunk = |c: &str| format!(r#"{{"id":"1","object":"chat.completion.chunk","model":"tiny-model","choices":[{{"index":0,"delta":{{"content":"{c}"}},"finish_reason":null}}]}}"#);
+    let chunk = |c: &str| {
+        format!(
+            r#"{{"id":"1","object":"chat.completion.chunk","model":"tiny-model","choices":[{{"index":0,"delta":{{"content":"{c}"}},"finish_reason":null}}]}}"#
+        )
+    };
     let last = r#"{"id":"1","object":"chat.completion.chunk","model":"tiny-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}"#;
     let (port, seen) = fake_server(vec![sse(&[&chunk("Hel"), &chunk("lo"), last])]).await;
     let p = GenaiProvider::new(&profile(port), None).unwrap();
-    let events: Vec<_> = collect(&p, request(false)).await.into_iter().map(|e| e.unwrap()).collect();
-    let text: String = events.iter().filter_map(|e| if let StreamEvent::TextDelta(t) = e { Some(t.as_str()) } else { None }).collect();
+    let events: Vec<_> = collect(&p, request(false))
+        .await
+        .into_iter()
+        .map(|e| e.unwrap())
+        .collect();
+    let text: String = events
+        .iter()
+        .filter_map(|e| {
+            if let StreamEvent::TextDelta(t) = e {
+                Some(t.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
     assert_eq!(text, "Hello");
-    assert!(events.contains(&StreamEvent::Usage { input_tokens: 7, output_tokens: 3, cached_tokens: 0 }), "{events:?}");
+    assert!(
+        events.contains(&StreamEvent::Usage {
+            input_tokens: 7,
+            output_tokens: 3,
+            cached_tokens: 0
+        }),
+        "{events:?}"
+    );
     assert_eq!(events.last(), Some(&StreamEvent::Stop(StopReason::EndTurn)));
     let req = seen.lock().unwrap()[0].clone();
     assert!(req.starts_with("POST /v1/chat/completions"), "{req}");
@@ -114,10 +159,32 @@ async fn streams_tool_calls() {
     let last = r#"{"id":"1","object":"chat.completion.chunk","model":"tiny-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#;
     let (port, _) = fake_server(vec![sse(&[first, second, last])]).await;
     let p = GenaiProvider::new(&profile(port), None).unwrap();
-    let events: Vec<_> = collect(&p, request(true)).await.into_iter().map(|e| e.unwrap()).collect();
-    assert!(events.contains(&StreamEvent::ToolCallStart { id: "call_1".into(), name: "read_file".into() }), "{events:?}");
-    let args: String = events.iter().filter_map(|e| if let StreamEvent::ToolCallArgsDelta { fragment, .. } = e { Some(fragment.as_str()) } else { None }).collect();
-    assert_eq!(serde_json::from_str::<serde_json::Value>(&args).unwrap(), serde_json::json!({"path":"a.txt"}));
+    let events: Vec<_> = collect(&p, request(true))
+        .await
+        .into_iter()
+        .map(|e| e.unwrap())
+        .collect();
+    assert!(
+        events.contains(&StreamEvent::ToolCallStart {
+            id: "call_1".into(),
+            name: "read_file".into()
+        }),
+        "{events:?}"
+    );
+    let args: String = events
+        .iter()
+        .filter_map(|e| {
+            if let StreamEvent::ToolCallArgsDelta { fragment, .. } = e {
+                Some(fragment.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&args).unwrap(),
+        serde_json::json!({"path":"a.txt"})
+    );
     assert_eq!(events.last(), Some(&StreamEvent::Stop(StopReason::ToolUse)));
 }
 
@@ -129,7 +196,9 @@ async fn rate_limit_is_transient_with_retry_after_and_bad_key_is_fatal() {
     let p = GenaiProvider::new(&profile(port), None).unwrap();
     let err = first_error(&p, request(false)).await;
     match err {
-        ProviderError::Transient { retry_after, .. } => assert_eq!(retry_after, Some(std::time::Duration::from_secs(2))),
+        ProviderError::Transient { retry_after, .. } => {
+            assert_eq!(retry_after, Some(std::time::Duration::from_secs(2)))
+        }
         e => panic!("expected transient, got {e:?}"),
     }
     let err = first_error(&p, request(false)).await;

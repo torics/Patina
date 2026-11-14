@@ -16,8 +16,12 @@ fn default_base(kind: ProviderKind) -> &'static str {
 /// Pull model ids out of the response body for each provider's list format.
 pub fn parse_model_ids(kind: ProviderKind, body: &serde_json::Value) -> Vec<String> {
     let ids = |arr: Option<&Vec<serde_json::Value>>, key: &str| -> Vec<String> {
-        arr.map(|a| a.iter().filter_map(|m| m.get(key)?.as_str().map(str::to_string)).collect())
-            .unwrap_or_default()
+        arr.map(|a| {
+            a.iter()
+                .filter_map(|m| m.get(key)?.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
     };
     let mut out = match kind {
         ProviderKind::Ollama => ids(body.get("models").and_then(|v| v.as_array()), "name"),
@@ -31,24 +35,39 @@ pub fn parse_model_ids(kind: ProviderKind, body: &serde_json::Value) -> Vec<Stri
     out
 }
 
-pub async fn list_models(profile: &ProviderProfile, api_key: Option<&str>) -> Result<Vec<String>, ProviderError> {
-    let base = profile.base_url.as_deref().unwrap_or(default_base(profile.kind)).trim_end_matches('/');
+pub async fn list_models(
+    profile: &ProviderProfile,
+    api_key: Option<&str>,
+) -> Result<Vec<String>, ProviderError> {
+    let base = profile
+        .base_url
+        .as_deref()
+        .unwrap_or(default_base(profile.kind))
+        .trim_end_matches('/');
     let (url, mut headers) = match profile.kind {
         ProviderKind::Ollama => {
             let root = base.strip_suffix("/v1").unwrap_or(base);
             (format!("{root}/api/tags"), vec![])
         }
-        ProviderKind::Gemini => (format!("{base}/models?pageSize=1000"), vec![("x-goog-api-key", api_key.unwrap_or("").to_string())]),
+        ProviderKind::Gemini => (
+            format!("{base}/models?pageSize=1000"),
+            vec![("x-goog-api-key", api_key.unwrap_or("").to_string())],
+        ),
         ProviderKind::Anthropic => (
             format!("{base}/models?limit=1000"),
-            vec![("x-api-key", api_key.unwrap_or("").to_string()), ("anthropic-version", "2023-06-01".to_string())],
+            vec![
+                ("x-api-key", api_key.unwrap_or("").to_string()),
+                ("anthropic-version", "2023-06-01".to_string()),
+            ],
         ),
         _ => (format!("{base}/models"), vec![]),
     };
-    if matches!(profile.kind, ProviderKind::Openai | ProviderKind::OpenaiCompatible) {
-        if let Some(k) = api_key {
-            headers.push(("authorization", format!("Bearer {k}")));
-        }
+    if matches!(
+        profile.kind,
+        ProviderKind::Openai | ProviderKind::OpenaiCompatible
+    ) && let Some(k) = api_key
+    {
+        headers.push(("authorization", format!("Bearer {k}")));
     }
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
@@ -60,16 +79,27 @@ pub async fn list_models(profile: &ProviderProfile, api_key: Option<&str>) -> Re
         rb = rb.header(k, v);
     }
     // reqwest errors can embed the URL, which for Gemini-style setups must never carry a key: keys go in headers.
-    let resp = rb
-        .send()
-        .await
-        .map_err(|e| ProviderError::Transient { message: format!("cannot reach {url}: {}", e.without_url()), retry_after: None })?;
+    let resp = rb.send().await.map_err(|e| ProviderError::Transient {
+        message: format!("cannot reach {url}: {}", e.without_url()),
+        retry_after: None,
+    })?;
     let status = resp.status();
     if !status.is_success() {
-        let body: String = resp.text().await.unwrap_or_default().chars().take(300).collect();
-        return Err(ProviderError::Fatal(format!("model list returned HTTP {status}: {body}")));
+        let body: String = resp
+            .text()
+            .await
+            .unwrap_or_default()
+            .chars()
+            .take(300)
+            .collect();
+        return Err(ProviderError::Fatal(format!(
+            "model list returned HTTP {status}: {body}"
+        )));
     }
-    let body: serde_json::Value = resp.json().await.map_err(|e| ProviderError::Fatal(format!("bad model list: {}", e.without_url())))?;
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| ProviderError::Fatal(format!("bad model list: {}", e.without_url())))?;
     Ok(parse_model_ids(profile.kind, &body))
 }
 
@@ -80,9 +110,27 @@ mod tests {
 
     #[test]
     fn parses_each_list_format() {
-        assert_eq!(parse_model_ids(ProviderKind::Openai, &json!({"data":[{"id":"b"},{"id":"a"}]})), ["a", "b"]);
-        assert_eq!(parse_model_ids(ProviderKind::Ollama, &json!({"models":[{"name":"llama3:8b"}]})), ["llama3:8b"]);
-        assert_eq!(parse_model_ids(ProviderKind::Gemini, &json!({"models":[{"name":"models/gem-1"}]})), ["gem-1"]);
+        assert_eq!(
+            parse_model_ids(
+                ProviderKind::Openai,
+                &json!({"data":[{"id":"b"},{"id":"a"}]})
+            ),
+            ["a", "b"]
+        );
+        assert_eq!(
+            parse_model_ids(
+                ProviderKind::Ollama,
+                &json!({"models":[{"name":"llama3:8b"}]})
+            ),
+            ["llama3:8b"]
+        );
+        assert_eq!(
+            parse_model_ids(
+                ProviderKind::Gemini,
+                &json!({"models":[{"name":"models/gem-1"}]})
+            ),
+            ["gem-1"]
+        );
         assert!(parse_model_ids(ProviderKind::Anthropic, &json!({})).is_empty());
     }
 }

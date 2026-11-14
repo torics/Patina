@@ -10,11 +10,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with: { components: "rustfmt, clippy" }
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: ui/package-lock.json }
       - run: cargo fmt --check
+      # Regenerates the UI's API types from the Rust types, then builds ui/dist for embedding.
+      - run: cargo xtask ui
+      - name: Generated API types are committed and current
+        run: git diff --exit-code -- ui/src/api/generated && test -z "$(git status --porcelain -- ui/src/api/generated)"
+      - run: npm test
+        working-directory: ui
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --all
       - run: cargo build --release
       - run: ./scripts/check-budgets.sh
+      - name: Browser smoke test
+        working-directory: ui
+        run: npx playwright install --with-deps chromium && npx playwright test --trace off
+        env:
+          PATINA_BIN: ${{ github.workspace }}/target/release/patina
   supply-chain:
     runs-on: ubuntu-latest
     steps:

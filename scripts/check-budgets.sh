@@ -15,3 +15,8 @@ sleep 1
 rss=$(awk '/VmRSS/ {print $2}' /proc/$PID/status)
 echo "idle RSS: ${rss} kB (limit $MAX_RSS_KB)"
 [ "$rss" -le "$MAX_RSS_KB" ] || { echo "idle memory too high"; exit 1; }
+if [ -d ui/dist ]; then
+  ui=$(find ui/dist -type f -print0 | xargs -0 cat | gzip -c | wc -c)
+  echo "UI assets gzipped: $ui bytes (limit 512000)"
+  [ "$ui" -le 512000 ] || { echo "UI assets too large"; exit 1; }
+fi

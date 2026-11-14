@@ -16,13 +16,22 @@ pub struct ApiError {
 
 impl ApiError {
     pub fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> ApiError {
-        ApiError { status, code, message: message.into(), retry_after_s: None }
+        ApiError {
+            status,
+            code,
+            message: message.into(),
+            retry_after_s: None,
+        }
     }
     pub fn bad_request(message: impl Into<String>) -> ApiError {
         ApiError::new(StatusCode::BAD_REQUEST, "bad_request", message)
     }
     pub fn not_found(what: &str) -> ApiError {
-        ApiError::new(StatusCode::NOT_FOUND, "not_found", format!("{what} not found"))
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            format!("{what} not found"),
+        )
     }
     pub fn unauthorized() -> ApiError {
         ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized", "sign in required")
@@ -36,17 +45,25 @@ impl ApiError {
     /// Internal details go to the log, never to the client.
     pub fn internal(detail: impl std::fmt::Display) -> ApiError {
         tracing::error!(error = %detail, "internal error");
-        ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", "internal error")
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            "internal error",
+        )
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let mut r = (self.status, Json(json!({"error": {"code": self.code, "message": self.message}}))).into_response();
-        if let Some(s) = self.retry_after_s {
-            if let Ok(v) = s.to_string().parse() {
-                r.headers_mut().insert(axum::http::header::RETRY_AFTER, v);
-            }
+        let mut r = (
+            self.status,
+            Json(json!({"error": {"code": self.code, "message": self.message}})),
+        )
+            .into_response();
+        if let Some(s) = self.retry_after_s
+            && let Ok(v) = s.to_string().parse()
+        {
+            r.headers_mut().insert(axum::http::header::RETRY_AFTER, v);
         }
         r
     }

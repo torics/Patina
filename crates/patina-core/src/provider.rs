@@ -49,10 +49,16 @@ pub struct Message {
 
 impl Message {
     pub fn user(text: impl Into<String>) -> Message {
-        Message { role: Role::User, parts: vec![Part::Text(text.into())] }
+        Message {
+            role: Role::User,
+            parts: vec![Part::Text(text.into())],
+        }
     }
     pub fn assistant(text: impl Into<String>) -> Message {
-        Message { role: Role::Assistant, parts: vec![Part::Text(text.into())] }
+        Message {
+            role: Role::Assistant,
+            parts: vec![Part::Text(text.into())],
+        }
     }
 }
 
@@ -60,10 +66,20 @@ impl Message {
 #[serde(rename_all = "snake_case")]
 pub enum Part {
     Text(String),
-    ToolCall { id: String, name: String, args: serde_json::Value },
-    ToolResult { id: String, content: String, is_error: bool },
+    ToolCall {
+        id: String,
+        name: String,
+        args: serde_json::Value,
+    },
+    ToolResult {
+        id: String,
+        content: String,
+        is_error: bool,
+    },
     /// Provider-specific, replayed verbatim to the same provider only.
-    Reasoning { opaque: serde_json::Value },
+    Reasoning {
+        opaque: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,10 +94,22 @@ pub struct ToolSpec {
 pub enum StreamEvent {
     TextDelta(String),
     ReasoningDelta(String),
-    ToolCallStart { id: String, name: String },
-    ToolCallArgsDelta { id: String, fragment: String },
-    ToolCallEnd { id: String },
-    Usage { input_tokens: u64, output_tokens: u64, cached_tokens: u64 },
+    ToolCallStart {
+        id: String,
+        name: String,
+    },
+    ToolCallArgsDelta {
+        id: String,
+        fragment: String,
+    },
+    ToolCallEnd {
+        id: String,
+    },
+    Usage {
+        input_tokens: u64,
+        output_tokens: u64,
+        cached_tokens: u64,
+    },
     Stop(StopReason),
 }
 
@@ -98,7 +126,10 @@ pub enum StopReason {
 pub enum ProviderError {
     /// 429, 5xx or a network failure: worth retrying. `retry_after` honors the `Retry-After` header.
     #[error("transient provider error: {message}")]
-    Transient { message: String, retry_after: Option<Duration> },
+    Transient {
+        message: String,
+        retry_after: Option<Duration>,
+    },
     #[error("provider rejected the request: {0}")]
     Fatal(String),
     #[error("no event from the provider for {0:?}")]
@@ -109,6 +140,9 @@ pub enum ProviderError {
 
 impl ProviderError {
     pub fn is_retryable(&self) -> bool {
-        matches!(self, ProviderError::Transient { .. } | ProviderError::IdleTimeout(_))
+        matches!(
+            self,
+            ProviderError::Transient { .. } | ProviderError::IdleTimeout(_)
+        )
     }
 }
