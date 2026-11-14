@@ -1,0 +1,19 @@
+[package]
+name = "patina-providers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+patina-core.workspace = true
+genai = "0.7.4"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+async-trait.workspace = true
+futures.workspace = true
+tokio = { workspace = true, features = ["time", "sync"] }
+tokio-util.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "net"] }
