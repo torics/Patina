@@ -63,10 +63,7 @@ fn locked(wait: Duration) -> ApiError {
     let mut e = ApiError::new(
         axum::http::StatusCode::TOO_MANY_REQUESTS,
         "locked_out",
-        format!(
-            "too many failed attempts; try again in {} seconds",
-            wait.as_secs() + 1
-        ),
+        format!("too many failed attempts; try again in {} seconds", wait.as_secs() + 1),
     );
     e.retry_after_s = Some(wait.as_secs() + 1);
     e
@@ -83,20 +80,12 @@ fn host_name(host: &str) -> String {
 
 /// Reject requests whose `Host` is not on the allowed list (DNS rebinding defense).
 pub async fn host_guard(State(st): State<Arc<AppState>>, req: Request, next: Next) -> Response {
-    let host = req
-        .headers()
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .map(host_name);
-    let ok = host.as_ref().is_some_and(|h| {
-        st.config
-            .allowed_hosts
-            .iter()
-            .any(|a| a.eq_ignore_ascii_case(h))
-    });
+    let host = req.headers().get(header::HOST).and_then(|v| v.to_str().ok()).map(host_name);
+    let ok = host
+        .as_ref()
+        .is_some_and(|h| st.config.allowed_hosts.iter().any(|a| a.eq_ignore_ascii_case(h)));
     if !ok {
-        return ApiError::forbidden("host_not_allowed", "this host name is not in allowed_hosts")
-            .into_response();
+        return ApiError::forbidden("host_not_allowed", "this host name is not in allowed_hosts").into_response();
     }
     next.run(req).await
 }
@@ -108,18 +97,10 @@ pub async fn security_headers(req: Request, next: Next) -> Response {
     let h = r.headers_mut();
     h.insert(
         header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(
-            "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
-        ),
+        HeaderValue::from_static("default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"),
     );
-    h.insert(
-        header::X_CONTENT_TYPE_OPTIONS,
-        HeaderValue::from_static("nosniff"),
-    );
-    h.insert(
-        header::REFERRER_POLICY,
-        HeaderValue::from_static("no-referrer"),
-    );
+    h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
     h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     if is_api {
         h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -152,10 +133,7 @@ fn check_origin(headers: &HeaderMap) -> ApiResult<()> {
         .map(|(_, a)| a.trim_end_matches('/').to_ascii_lowercase());
     match (authority, host) {
         (Some(a), Some(h)) if a == h.to_ascii_lowercase() => Ok(()),
-        _ => Err(ApiError::forbidden(
-            "bad_origin",
-            "missing or mismatched Origin header",
-        )),
+        _ => Err(ApiError::forbidden("bad_origin", "missing or mismatched Origin header")),
     }
 }
 
@@ -166,11 +144,7 @@ pub struct SessionInfo {
 }
 
 /// Guards the protected API: a valid session, and for unsafe methods a matching CSRF header and Origin.
-pub async fn require_session(
-    State(st): State<Arc<AppState>>,
-    mut req: Request,
-    next: Next,
-) -> Response {
+pub async fn require_session(State(st): State<Arc<AppState>>, mut req: Request, next: Next) -> Response {
     // Copy what is needed first: a borrowed request cannot be held across an await.
     let (headers, method) = (req.headers().clone(), req.method().clone());
     match authorize(&st, &headers, &method).await {
@@ -189,15 +163,9 @@ async fn authorize(st: &AppState, headers: &HeaderMap, method: &Method) -> ApiRe
         .ok_or_else(ApiError::unauthorized)?;
     if is_unsafe(method) {
         check_origin(headers)?;
-        let sent = headers
-            .get(CSRF_HEADER)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
+        let sent = headers.get(CSRF_HEADER).and_then(|v| v.to_str().ok()).unwrap_or("");
         if !store::constant_time_eq(sent, &session.csrf_token) {
-            return Err(ApiError::forbidden(
-                "bad_csrf",
-                "missing or invalid CSRF token",
-            ));
+            return Err(ApiError::forbidden("bad_csrf", "missing or invalid CSRF token"));
         }
     }
     Ok(SessionInfo {
@@ -207,10 +175,7 @@ async fn authorize(st: &AppState, headers: &HeaderMap, method: &Method) -> ApiRe
 }
 
 fn session_cookie(token: &str, headers: &HeaderMap, max_age_s: i64) -> String {
-    let secure = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        == Some("https");
+    let secure = headers.get("x-forwarded-proto").and_then(|v| v.to_str().ok()) == Some("https");
     format!(
         "{COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={max_age_s}{}",
         if secure { "; Secure" } else { "" }
@@ -222,27 +187,21 @@ async fn start_session(st: &AppState, headers: &HeaderMap) -> ApiResult<Response
     let mut r = Json(json!({"csrf": csrf})).into_response();
     r.headers_mut().insert(
         header::SET_COOKIE,
-        HeaderValue::from_str(&session_cookie(&token, headers, SESSION_TTL_MS / 1000))
-            .map_err(ApiError::internal)?,
+        HeaderValue::from_str(&session_cookie(&token, headers, SESSION_TTL_MS / 1000)).map_err(ApiError::internal)?,
     );
     Ok(r)
 }
 
 async fn hash_password(pw: String) -> ApiResult<String> {
-    tokio::task::spawn_blocking(move || {
-        Argon2::default()
-            .hash_password(pw.as_bytes())
-            .map(|h| h.to_string())
-    })
-    .await
-    .map_err(ApiError::internal)?
-    .map_err(ApiError::internal)
+    tokio::task::spawn_blocking(move || Argon2::default().hash_password(pw.as_bytes()).map(|h| h.to_string()))
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(ApiError::internal)
 }
 
 async fn verify_password(pw: String, stored: String) -> bool {
     tokio::task::spawn_blocking(move || {
-        PasswordHash::new(&stored)
-            .is_ok_and(|h| Argon2::default().verify_password(pw.as_bytes(), &h).is_ok())
+        PasswordHash::new(&stored).is_ok_and(|h| Argon2::default().verify_password(pw.as_bytes(), &h).is_ok())
     })
     .await
     .unwrap_or(false)
@@ -254,17 +213,9 @@ pub struct SetupBody {
     password: String,
 }
 
-pub async fn setup(
-    State(st): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Json(b): Json<SetupBody>,
-) -> ApiResult<Response> {
+pub async fn setup(State(st): State<Arc<AppState>>, headers: HeaderMap, Json(b): Json<SetupBody>) -> ApiResult<Response> {
     check_origin(&headers)?;
-    st.limiter
-        .lock()
-        .unwrap()
-        .check(Instant::now())
-        .map_err(locked)?;
+    st.limiter.lock().unwrap().check(Instant::now()).map_err(locked)?;
     let Some(expected) = store::get_setting(&st.db, store::SETUP_TOKEN_HASH).await? else {
         return Err(ApiError::conflict(
             "already_set_up",
@@ -297,22 +248,11 @@ pub struct LoginBody {
     password: String,
 }
 
-pub async fn login(
-    State(st): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Json(b): Json<LoginBody>,
-) -> ApiResult<Response> {
+pub async fn login(State(st): State<Arc<AppState>>, headers: HeaderMap, Json(b): Json<LoginBody>) -> ApiResult<Response> {
     check_origin(&headers)?;
-    st.limiter
-        .lock()
-        .unwrap()
-        .check(Instant::now())
-        .map_err(locked)?;
+    st.limiter.lock().unwrap().check(Instant::now()).map_err(locked)?;
     let Some(stored) = store::get_setting(&st.db, store::PASSWORD_HASH).await? else {
-        return Err(ApiError::conflict(
-            "setup_required",
-            "set the owner password first",
-        ));
+        return Err(ApiError::conflict("setup_required", "set the owner password first"));
     };
     if !verify_password(b.password, stored).await {
         st.limiter.lock().unwrap().fail(Instant::now());
@@ -332,15 +272,9 @@ pub async fn logout(State(st): State<Arc<AppState>>, headers: HeaderMap) -> ApiR
     let session = store::lookup_session(&st.db, &token, now_ms())
         .await?
         .ok_or_else(ApiError::unauthorized)?;
-    let sent = headers
-        .get(CSRF_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
+    let sent = headers.get(CSRF_HEADER).and_then(|v| v.to_str().ok()).unwrap_or("");
     if !store::constant_time_eq(sent, &session.csrf_token) {
-        return Err(ApiError::forbidden(
-            "bad_csrf",
-            "missing or invalid CSRF token",
-        ));
+        return Err(ApiError::forbidden("bad_csrf", "missing or invalid CSRF token"));
     }
     store::delete_session(&st.db, &token).await?;
     let mut r = Json(json!({"ok": true})).into_response();
@@ -352,13 +286,8 @@ pub async fn logout(State(st): State<Arc<AppState>>, headers: HeaderMap) -> ApiR
 }
 
 /// Tells the UI which screen to show. It reveals no secret and the CSRF token only to a signed-in caller.
-pub async fn session_state(
-    State(st): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> ApiResult<Json<serde_json::Value>> {
-    let setup_required = store::get_setting(&st.db, store::SETUP_TOKEN_HASH)
-        .await?
-        .is_some();
+pub async fn session_state(State(st): State<Arc<AppState>>, headers: HeaderMap) -> ApiResult<Json<serde_json::Value>> {
+    let setup_required = store::get_setting(&st.db, store::SETUP_TOKEN_HASH).await?.is_some();
     let session = match cookie_value(&headers, COOKIE) {
         Some(t) => store::lookup_session(&st.db, &t, now_ms()).await?,
         None => None,
@@ -388,10 +317,7 @@ mod tests {
         for _ in 0..5 {
             l.fail(t0 + Duration::from_secs(61));
         }
-        assert_eq!(
-            l.check(t0 + Duration::from_secs(61)).unwrap_err(),
-            Duration::from_secs(120)
-        );
+        assert_eq!(l.check(t0 + Duration::from_secs(61)).unwrap_err(), Duration::from_secs(120));
         l.succeed();
         assert!(l.check(t0 + Duration::from_secs(61)).is_ok());
     }
@@ -422,10 +348,7 @@ mod tests {
     #[test]
     fn cookie_parsing_finds_the_session() {
         let mut m = HeaderMap::new();
-        m.insert(
-            header::COOKIE,
-            "a=1; patina_session=tok; b=2".parse().unwrap(),
-        );
+        m.insert(header::COOKIE, "a=1; patina_session=tok; b=2".parse().unwrap());
         assert_eq!(cookie_value(&m, COOKIE).as_deref(), Some("tok"));
         assert_eq!(cookie_value(&m, "zzz"), None);
     }

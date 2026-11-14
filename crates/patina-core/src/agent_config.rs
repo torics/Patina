@@ -38,8 +38,7 @@ fn default_context_window() -> u32 {
 
 impl AgentConfig {
     pub fn parse(text: &str) -> Result<AgentConfig, String> {
-        let a: AgentConfig =
-            toml::from_str(text).map_err(|e| format!("invalid agent file: {e}"))?;
+        let a: AgentConfig = toml::from_str(text).map_err(|e| format!("invalid agent file: {e}"))?;
         a.validate()?;
         Ok(a)
     }
@@ -50,16 +49,10 @@ impl AgentConfig {
 
     pub fn validate(&self) -> Result<(), String> {
         if self.schema_version != 1 {
-            return Err(format!(
-                "unsupported agent schema_version {}",
-                self.schema_version
-            ));
+            return Err(format!("unsupported agent schema_version {}", self.schema_version));
         }
         if !valid_id(&self.id) {
-            return Err(format!(
-                "invalid agent id {:?}: use letters, digits, - and _",
-                self.id
-            ));
+            return Err(format!("invalid agent id {:?}: use letters, digits, - and _", self.id));
         }
         if self.provider.is_empty() || self.model.trim().is_empty() {
             return Err("an agent needs a provider and a model".into());

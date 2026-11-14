@@ -1,4 +1,5 @@
 //! SQLite storage: schema, migrations and the connection setup.
+pub mod approvals;
 pub mod auth;
 pub mod runs;
 pub mod secrets;
@@ -48,6 +49,9 @@ const MIGRATIONS: &[&str] = &[
         created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);",
     // 2: owner settings (password hash, setup token hash)
     "CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+    // 3: what happened to a run's changes (merged, kept, discarded); approvals remember when they were asked
+    "ALTER TABLE runs ADD COLUMN disposition TEXT;
+     ALTER TABLE approvals ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0;",
 ];
 
 type Job = Box<dyn FnOnce(&mut Connection) + Send>;
@@ -126,34 +130,19 @@ mod tests {
         let mut s = c
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap();
-        s.query_map([], |r| r.get(0))
-            .unwrap()
-            .map(|r| r.unwrap())
-            .collect()
+        s.query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect()
     }
 
     #[test]
     fn creates_schema_in_wal_mode() {
         let t = tempfile::tempdir().unwrap();
         let c = open(&t.path().join("p.db")).unwrap();
-        for name in [
-            "approvals",
-            "checkpoints",
-            "events",
-            "messages",
-            "runs",
-            "secrets",
-            "sessions",
-        ] {
+        for name in ["approvals", "checkpoints", "events", "messages", "runs", "secrets", "sessions"] {
             assert!(tables(&c).contains(&name.to_string()), "missing {name}");
         }
-        let mode: String = c
-            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
-            .unwrap();
+        let mode: String = c.query_row("PRAGMA journal_mode", [], |r| r.get(0)).unwrap();
         assert_eq!(mode, "wal");
-        let fk: i64 = c
-            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
-            .unwrap();
+        let fk: i64 = c.query_row("PRAGMA foreign_keys", [], |r| r.get(0)).unwrap();
         assert_eq!(fk, 1);
     }
 
@@ -163,9 +152,7 @@ mod tests {
         let p = t.path().join("p.db");
         drop(open(&p).unwrap());
         let c = open(&p).unwrap();
-        let v: i64 = c
-            .query_row("PRAGMA user_version", [], |r| r.get(0))
-            .unwrap();
+        let v: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
         assert_eq!(v, schema_version());
     }
 

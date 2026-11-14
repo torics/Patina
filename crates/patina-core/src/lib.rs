@@ -4,9 +4,12 @@
 pub mod agent;
 pub mod agent_config;
 pub mod api;
+pub mod budget;
 pub mod config;
 pub mod events;
 pub mod paths;
+pub mod policy;
+pub mod project_config;
 pub mod provider;
 pub mod provider_config;
 pub mod tool;

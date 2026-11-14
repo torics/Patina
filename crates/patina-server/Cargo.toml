@@ -8,6 +8,7 @@ license.workspace = true
 patina-core.workspace = true
 patina-store.workspace = true
 patina-providers.workspace = true
+patina-tools.workspace = true
 axum = { workspace = true, features = ["json", "query"] }
 tokio = { workspace = true, features = ["process"] }
 tower-http.workspace = true

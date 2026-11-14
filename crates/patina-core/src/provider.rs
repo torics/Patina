@@ -105,6 +105,8 @@ pub enum StreamEvent {
     ToolCallEnd {
         id: String,
     },
+    /// A provider-specific reasoning block that must be sent back unchanged on the next turn.
+    ReasoningBlock(serde_json::Value),
     Usage {
         input_tokens: u64,
         output_tokens: u64,
@@ -126,10 +128,7 @@ pub enum StopReason {
 pub enum ProviderError {
     /// 429, 5xx or a network failure: worth retrying. `retry_after` honors the `Retry-After` header.
     #[error("transient provider error: {message}")]
-    Transient {
-        message: String,
-        retry_after: Option<Duration>,
-    },
+    Transient { message: String, retry_after: Option<Duration> },
     #[error("provider rejected the request: {0}")]
     Fatal(String),
     #[error("no event from the provider for {0:?}")]
@@ -140,9 +139,6 @@ pub enum ProviderError {
 
 impl ProviderError {
     pub fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            ProviderError::Transient { .. } | ProviderError::IdleTimeout(_)
-        )
+        matches!(self, ProviderError::Transient { .. } | ProviderError::IdleTimeout(_))
     }
 }

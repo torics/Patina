@@ -24,16 +24,8 @@ fn main() {
         // Export the API types first, so the UI is always built against the current Rust types.
         Some("ui") => {
             types(&root);
-            let lock = if ui.join("node_modules").exists() {
-                "install"
-            } else {
-                "ci"
-            };
-            run(Command::new("npm")
-                .arg(lock)
-                .arg("--no-audit")
-                .arg("--no-fund")
-                .current_dir(&ui));
+            let lock = if ui.join("node_modules").exists() { "install" } else { "ci" };
+            run(Command::new("npm").arg(lock).arg("--no-audit").arg("--no-fund").current_dir(&ui));
             run(Command::new("npm").args(["run", "build"]).current_dir(&ui));
         }
         Some("types") => types(&root),

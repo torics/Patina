@@ -24,10 +24,17 @@ pub struct ToolOutput {
 
 impl ToolOutput {
     pub fn ok(content: impl Into<String>) -> ToolOutput {
-        ToolOutput { content: content.into(), ..Default::default() }
+        ToolOutput {
+            content: content.into(),
+            ..Default::default()
+        }
     }
     pub fn error(content: impl Into<String>) -> ToolOutput {
-        ToolOutput { content: content.into(), is_error: true, changed_files: false }
+        ToolOutput {
+            content: content.into(),
+            is_error: true,
+            changed_files: false,
+        }
     }
 }
 
@@ -90,7 +97,13 @@ fn check(schema: &Value, v: &Value, at: &str) -> Result<(), String> {
     }
     if let Some(obj) = v.as_object() {
         let props = s.get("properties").and_then(Value::as_object);
-        for req in s.get("required").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
+        for req in s
+            .get("required")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
             if !obj.contains_key(req) {
                 return Err(format!("{at} is missing required field {req:?}"));
             }
@@ -158,6 +171,12 @@ mod tests {
 
     #[test]
     fn unknown_keywords_are_ignored() {
-        assert_eq!(validate(&json!({"type": "object", "patternProperties": {"x": {}}, "oneOf": []}), &json!({"a": 1})), Ok(()));
+        assert_eq!(
+            validate(
+                &json!({"type": "object", "patternProperties": {"x": {}}, "oneOf": []}),
+                &json!({"a": 1})
+            ),
+            Ok(())
+        );
     }
 }

@@ -61,11 +61,7 @@ pub struct Session {
 }
 
 /// Returns `(session token, csrf token)`. Only the token's hash is stored.
-pub async fn create_session(
-    db: &Db,
-    now_ms: i64,
-    ttl_ms: i64,
-) -> Result<(String, String), StoreError> {
+pub async fn create_session(db: &Db, now_ms: i64, ttl_ms: i64) -> Result<(String, String), StoreError> {
     let token = new_token();
     let csrf = new_token();
     let (h, c) = (hash_token(&token), csrf.clone());
@@ -81,16 +77,10 @@ pub async fn create_session(
     Ok((token, csrf))
 }
 
-pub async fn lookup_session(
-    db: &Db,
-    token: &str,
-    now_ms: i64,
-) -> Result<Option<Session>, StoreError> {
+pub async fn lookup_session(db: &Db, token: &str, now_ms: i64) -> Result<Option<Session>, StoreError> {
     let h = hash_token(token);
     db.call(move |c| {
-        let mut s = c.prepare(
-            "SELECT csrf_token, expires_at FROM sessions WHERE token_hash = ?1 AND expires_at > ?2",
-        )?;
+        let mut s = c.prepare("SELECT csrf_token, expires_at FROM sessions WHERE token_hash = ?1 AND expires_at > ?2")?;
         let mut rows = s.query(rusqlite::params![h, now_ms])?;
         Ok(match rows.next()? {
             Some(r) => Some(Session {
@@ -133,10 +123,7 @@ mod tests {
         let s = lookup_session(&db, &token, 2_000).await.unwrap().unwrap();
         assert_eq!(s.csrf_token, csrf);
         assert!(lookup_session(&db, "wrong", 2_000).await.unwrap().is_none());
-        assert!(
-            lookup_session(&db, &token, 6_000).await.unwrap().is_none(),
-            "expired"
-        );
+        assert!(lookup_session(&db, &token, 6_000).await.unwrap().is_none(), "expired");
         let stored: String = db
             .call(|c| Ok(c.query_row("SELECT token_hash FROM sessions", [], |r| r.get(0))?))
             .await

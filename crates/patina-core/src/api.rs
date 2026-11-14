@@ -1,5 +1,7 @@
 //! Types that cross the HTTP API. The UI's TypeScript types are generated from these with ts-rs,
 //! so the two cannot drift. This crate does not embed the UI, so the export can run before the UI build.
+use crate::budget::{Budgets, Usage};
+use crate::policy::PolicyMode;
 use crate::provider_config::{Price, ProviderKind};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -79,11 +81,19 @@ pub struct ProviderTestResult {
 #[ts(export)]
 pub struct RunView {
     pub id: String,
+    /// Empty for a plain chat with no project.
+    pub project_id: String,
     pub agent_id: String,
     pub prompt: String,
     pub status: String,
-    #[ts(type = "Record<string, unknown>")]
-    pub usage: serde_json::Value,
+    pub budgets: Budgets,
+    pub usage: Usage,
+    pub branch: Option<String>,
+    pub base_commit: Option<String>,
+    /// True while the run's worktree exists on disk.
+    pub has_worktree: bool,
+    /// What happened to the changes: `merged`, `kept`, `discarded`, or null while undecided.
+    pub disposition: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -93,6 +103,113 @@ pub struct RunView {
 pub struct NewRun {
     pub agent_id: String,
     pub prompt: String,
+    /// Run inside this project's worktree with the agent's tools. Without it, the run is a plain chat.
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub budgets: Option<Budgets>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct NewProject {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    pub path: String,
+    #[serde(default)]
+    pub policy: Option<PolicyMode>,
+    /// Run `git init` if the folder is not a repository yet.
+    #[serde(default)]
+    pub init_git: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ApprovalView {
+    pub id: String,
+    pub run_id: String,
+    pub agent_id: String,
+    pub tool_call_id: String,
+    pub tool: String,
+    #[ts(type = "Record<string, any>")]
+    pub args: serde_json::Value,
+    /// Unified diff for edits.
+    pub diff: Option<String>,
+    /// `pending`, `approved` or `denied`.
+    pub status: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalAction {
+    Approve,
+    Deny,
+    /// Approve with the arguments in `args`.
+    Edit,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ApprovalAnswer {
+    pub action: ApprovalAction,
+    /// For a denial: returned to the model.
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(default)]
+    #[ts(type = "Record<string, any> | null")]
+    pub args: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CheckpointView {
+    pub step: u32,
+    pub commit: String,
+    pub summary: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ChangedFile {
+    /// Git status letter: A, M or D.
+    pub status: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DiffView {
+    pub base_commit: String,
+    pub branch: String,
+    pub files: Vec<ChangedFile>,
+    pub diff: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RollbackInput {
+    pub step: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DiscardInput {
+    /// Keep the branch and remove only the worktree.
+    #[serde(default)]
+    pub keep_branch: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct MergeResult {
+    /// `fast_forward`, `merge_commit` or `already_up_to_date`.
+    pub result: String,
+    pub into_branch: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

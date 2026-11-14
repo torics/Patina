@@ -7,9 +7,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
 /// Serve one canned response per connection, recording each request's text.
-async fn fake_server(
-    responses: Vec<String>,
-) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+async fn fake_server(responses: Vec<String>) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
     let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -40,10 +38,7 @@ async fn fake_server(
                     break;
                 }
             }
-            seen2
-                .lock()
-                .unwrap()
-                .push(String::from_utf8_lossy(&buf).to_string());
+            seen2.lock().unwrap().push(String::from_utf8_lossy(&buf).to_string());
             s.write_all(resp.as_bytes()).await.unwrap();
             s.shutdown().await.ok();
         }
@@ -52,11 +47,7 @@ async fn fake_server(
 }
 
 fn sse(chunks: &[&str]) -> String {
-    let body: String = chunks
-        .iter()
-        .map(|c| format!("data: {c}\n\n"))
-        .collect::<String>()
-        + "data: [DONE]\n\n";
+    let body: String = chunks.iter().map(|c| format!("data: {c}\n\n")).collect::<String>() + "data: [DONE]\n\n";
     format!("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{body}")
 }
 
@@ -105,11 +96,7 @@ async fn first_error(p: &GenaiProvider, req: ChatRequest) -> ProviderError {
 }
 
 async fn collect(p: &GenaiProvider, req: ChatRequest) -> Vec<Result<StreamEvent, ProviderError>> {
-    p.stream(req, CancellationToken::new())
-        .await
-        .unwrap()
-        .collect()
-        .await
+    p.stream(req, CancellationToken::new()).await.unwrap().collect().await
 }
 
 #[tokio::test]
@@ -122,11 +109,7 @@ async fn streams_text_and_usage() {
     let last = r#"{"id":"1","object":"chat.completion.chunk","model":"tiny-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}"#;
     let (port, seen) = fake_server(vec![sse(&[&chunk("Hel"), &chunk("lo"), last])]).await;
     let p = GenaiProvider::new(&profile(port), None).unwrap();
-    let events: Vec<_> = collect(&p, request(false))
-        .await
-        .into_iter()
-        .map(|e| e.unwrap())
-        .collect();
+    let events: Vec<_> = collect(&p, request(false)).await.into_iter().map(|e| e.unwrap()).collect();
     let text: String = events
         .iter()
         .filter_map(|e| {
@@ -159,11 +142,7 @@ async fn streams_tool_calls() {
     let last = r#"{"id":"1","object":"chat.completion.chunk","model":"tiny-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#;
     let (port, _) = fake_server(vec![sse(&[first, second, last])]).await;
     let p = GenaiProvider::new(&profile(port), None).unwrap();
-    let events: Vec<_> = collect(&p, request(true))
-        .await
-        .into_iter()
-        .map(|e| e.unwrap())
-        .collect();
+    let events: Vec<_> = collect(&p, request(true)).await.into_iter().map(|e| e.unwrap()).collect();
     assert!(
         events.contains(&StreamEvent::ToolCallStart {
             id: "call_1".into(),
@@ -191,7 +170,8 @@ async fn streams_tool_calls() {
 #[tokio::test]
 async fn rate_limit_is_transient_with_retry_after_and_bad_key_is_fatal() {
     let limited = "HTTP/1.1 429 Too Many Requests\r\nretry-after: 2\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n{\"error\":\"slow\"}".to_string();
-    let denied = "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n{\"error\":\"bad key\"}".to_string();
+    let denied =
+        "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n{\"error\":\"bad key\"}".to_string();
     let (port, _) = fake_server(vec![limited, denied]).await;
     let p = GenaiProvider::new(&profile(port), None).unwrap();
     let err = first_error(&p, request(false)).await;

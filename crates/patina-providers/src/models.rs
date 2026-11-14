@@ -16,12 +16,8 @@ fn default_base(kind: ProviderKind) -> &'static str {
 /// Pull model ids out of the response body for each provider's list format.
 pub fn parse_model_ids(kind: ProviderKind, body: &serde_json::Value) -> Vec<String> {
     let ids = |arr: Option<&Vec<serde_json::Value>>, key: &str| -> Vec<String> {
-        arr.map(|a| {
-            a.iter()
-                .filter_map(|m| m.get(key)?.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
+        arr.map(|a| a.iter().filter_map(|m| m.get(key)?.as_str().map(str::to_string)).collect())
+            .unwrap_or_default()
     };
     let mut out = match kind {
         ProviderKind::Ollama => ids(body.get("models").and_then(|v| v.as_array()), "name"),
@@ -35,10 +31,7 @@ pub fn parse_model_ids(kind: ProviderKind, body: &serde_json::Value) -> Vec<Stri
     out
 }
 
-pub async fn list_models(
-    profile: &ProviderProfile,
-    api_key: Option<&str>,
-) -> Result<Vec<String>, ProviderError> {
+pub async fn list_models(profile: &ProviderProfile, api_key: Option<&str>) -> Result<Vec<String>, ProviderError> {
     let base = profile
         .base_url
         .as_deref()
@@ -62,10 +55,8 @@ pub async fn list_models(
         ),
         _ => (format!("{base}/models"), vec![]),
     };
-    if matches!(
-        profile.kind,
-        ProviderKind::Openai | ProviderKind::OpenaiCompatible
-    ) && let Some(k) = api_key
+    if matches!(profile.kind, ProviderKind::Openai | ProviderKind::OpenaiCompatible)
+        && let Some(k) = api_key
     {
         headers.push(("authorization", format!("Bearer {k}")));
     }
@@ -85,16 +76,8 @@ pub async fn list_models(
     })?;
     let status = resp.status();
     if !status.is_success() {
-        let body: String = resp
-            .text()
-            .await
-            .unwrap_or_default()
-            .chars()
-            .take(300)
-            .collect();
-        return Err(ProviderError::Fatal(format!(
-            "model list returned HTTP {status}: {body}"
-        )));
+        let body: String = resp.text().await.unwrap_or_default().chars().take(300).collect();
+        return Err(ProviderError::Fatal(format!("model list returned HTTP {status}: {body}")));
     }
     let body: serde_json::Value = resp
         .json()
@@ -111,24 +94,15 @@ mod tests {
     #[test]
     fn parses_each_list_format() {
         assert_eq!(
-            parse_model_ids(
-                ProviderKind::Openai,
-                &json!({"data":[{"id":"b"},{"id":"a"}]})
-            ),
+            parse_model_ids(ProviderKind::Openai, &json!({"data":[{"id":"b"},{"id":"a"}]})),
             ["a", "b"]
         );
         assert_eq!(
-            parse_model_ids(
-                ProviderKind::Ollama,
-                &json!({"models":[{"name":"llama3:8b"}]})
-            ),
+            parse_model_ids(ProviderKind::Ollama, &json!({"models":[{"name":"llama3:8b"}]})),
             ["llama3:8b"]
         );
         assert_eq!(
-            parse_model_ids(
-                ProviderKind::Gemini,
-                &json!({"models":[{"name":"models/gem-1"}]})
-            ),
+            parse_model_ids(ProviderKind::Gemini, &json!({"models":[{"name":"models/gem-1"}]})),
             ["gem-1"]
         );
         assert!(parse_model_ids(ProviderKind::Anthropic, &json!({})).is_empty());

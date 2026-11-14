@@ -37,7 +37,9 @@ fn str_arg<'a>(args: &'a Value, key: &str) -> &'a str {
 
 /// Run blocking file work off the async runtime.
 async fn blocking(f: impl FnOnce() -> ToolOutput + Send + 'static) -> ToolOutput {
-    tokio::task::spawn_blocking(f).await.unwrap_or_else(|e| ToolOutput::error(format!("tool crashed: {e}")))
+    tokio::task::spawn_blocking(f)
+        .await
+        .unwrap_or_else(|e| ToolOutput::error(format!("tool crashed: {e}")))
 }
 
 fn is_binary(bytes: &[u8]) -> bool {
@@ -47,7 +49,11 @@ fn is_binary(bytes: &[u8]) -> bool {
 fn walker(root: &std::path::Path, depth: Option<usize>) -> WalkBuilder {
     let mut b = WalkBuilder::new(root);
     // Honor .gitignore even where git metadata is not visible, show dotfiles, never descend into .git.
-    b.hidden(false).require_git(false).max_depth(depth).sort_by_file_name(|a, b| a.cmp(b)).filter_entry(|e| e.file_name() != ".git");
+    b.hidden(false)
+        .require_git(false)
+        .max_depth(depth)
+        .sort_by_file_name(|a, b| a.cmp(b))
+        .filter_entry(|e| e.file_name() != ".git");
     b
 }
 
@@ -88,9 +94,15 @@ impl Tool for ListFiles {
                 let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
                 lines.push(format!("{}{}", ws.display(entry.path()), if is_dir { "/" } else { "" }));
             }
-            let mut out = if lines.is_empty() { "(empty)".to_string() } else { lines.join("\n") };
+            let mut out = if lines.is_empty() {
+                "(empty)".to_string()
+            } else {
+                lines.join("\n")
+            };
             if truncated {
-                out.push_str(&format!("\n[stopped at {MAX_LIST_ENTRIES} entries; list a subfolder or lower the depth]"));
+                out.push_str(&format!(
+                    "\n[stopped at {MAX_LIST_ENTRIES} entries; list a subfolder or lower the depth]"
+                ));
             }
             ToolOutput::ok(out)
         })
@@ -150,7 +162,10 @@ impl Tool for ReadFile {
             } else if offset > total {
                 return ToolOutput::error(format!("offset {offset} is past the end; the file has {total} lines"));
             } else if last < total {
-                out.push_str(&format!("[showing lines {offset} to {last} of {total}; continue with offset {}]", last + 1));
+                out.push_str(&format!(
+                    "[showing lines {offset} to {last} of {total}; continue with offset {}]",
+                    last + 1
+                ));
             }
             ToolOutput::ok(out)
         })
@@ -222,7 +237,11 @@ impl Tool for Search {
                     }
                 }
             }
-            ToolOutput::ok(if hits.is_empty() { "no matches".to_string() } else { hits.join("\n") })
+            ToolOutput::ok(if hits.is_empty() {
+                "no matches".to_string()
+            } else {
+                hits.join("\n")
+            })
         })
         .await
     }
@@ -263,7 +282,11 @@ fn plan_edit(ws: &Workspace, args: &Value) -> Result<(std::path::PathBuf, String
     let updated = match (count, replace_all) {
         (0, _) => return Err(format!("old_string was not found in {rel:?}")),
         (1, _) | (_, true) => text.replace(old, new),
-        (n, false) => return Err(format!("old_string matches {n} times in {rel:?}; add context to make it unique, or set replace_all")),
+        (n, false) => {
+            return Err(format!(
+                "old_string matches {n} times in {rel:?}; add context to make it unique, or set replace_all"
+            ));
+        }
     };
     Ok((path, text, updated))
 }
@@ -286,10 +309,14 @@ impl Tool for EditFile {
     }
     async fn preview(&self, args: &Value) -> Option<String> {
         let (ws, args) = (self.0.clone(), args.clone());
-        tokio::task::spawn_blocking(move || plan_edit(&ws, &args).ok().map(|(_, old, new)| unified_diff(str_arg(&args, "path"), &old, &new)))
-            .await
-            .ok()
-            .flatten()
+        tokio::task::spawn_blocking(move || {
+            plan_edit(&ws, &args)
+                .ok()
+                .map(|(_, old, new)| unified_diff(str_arg(&args, "path"), &old, &new))
+        })
+        .await
+        .ok()
+        .flatten()
     }
     async fn call(&self, args: Value) -> ToolOutput {
         let ws = self.0.clone();
@@ -303,7 +330,11 @@ impl Tool for EditFile {
             }
             ws.remember(&path, new.as_bytes());
             let n = old.matches(str_arg(&args, "old_string")).count();
-            ToolOutput { content: format!("edited {} ({n} replacement{})", ws.display(&path), if n == 1 { "" } else { "s" }), is_error: false, changed_files: true }
+            ToolOutput {
+                content: format!("edited {} ({n} replacement{})", ws.display(&path), if n == 1 { "" } else { "s" }),
+                is_error: false,
+                changed_files: true,
+            }
         })
         .await
     }
@@ -362,7 +393,12 @@ impl Tool for WriteFile {
             }
             ws.remember(&path, content.as_bytes());
             ToolOutput {
-                content: format!("{} {} ({} bytes)", if existed { "overwrote" } else { "created" }, ws.display(&path), content.len()),
+                content: format!(
+                    "{} {} ({} bytes)",
+                    if existed { "overwrote" } else { "created" },
+                    ws.display(&path),
+                    content.len()
+                ),
                 is_error: false,
                 changed_files: true,
             }
@@ -410,8 +446,16 @@ mod tests {
         let f = fixture();
         let out = call(&f, "list_files", json!({"path": "."})).await;
         assert!(!out.is_error);
-        assert!(out.content.contains("src/main.rs") && out.content.contains("src/deep/"), "{}", out.content);
-        assert!(!out.content.contains("built.txt") && !out.content.contains(".git/"), "{}", out.content);
+        assert!(
+            out.content.contains("src/main.rs") && out.content.contains("src/deep/"),
+            "{}",
+            out.content
+        );
+        assert!(
+            !out.content.contains("built.txt") && !out.content.contains(".git/"),
+            "{}",
+            out.content
+        );
         let shallow = call(&f, "list_files", json!({"path": ".", "depth": 1})).await;
         assert!(!shallow.content.contains("main.rs"));
         assert!(call(&f, "list_files", json!({"path": "src/main.rs"})).await.is_error);
@@ -435,7 +479,11 @@ mod tests {
         let out = call(&f, "read_file", json!({"path": "src/main.rs"})).await;
         assert_eq!(out.content, "     1\tfn main() {\n     2\t    println!(\"hello\");\n     3\t}\n");
         let page = call(&f, "read_file", json!({"path": "src/main.rs", "offset": 2, "limit": 1})).await;
-        assert!(page.content.starts_with("     2\t") && page.content.contains("continue with offset 3"), "{}", page.content);
+        assert!(
+            page.content.starts_with("     2\t") && page.content.contains("continue with offset 3"),
+            "{}",
+            page.content
+        );
         assert!(call(&f, "read_file", json!({"path": "bin.dat"})).await.content.contains("binary"));
         assert!(call(&f, "read_file", json!({"path": "missing.txt"})).await.is_error);
         assert!(call(&f, "read_file", json!({"path": "src/main.rs", "offset": 99})).await.is_error);
@@ -454,8 +502,16 @@ mod tests {
         assert_eq!(out.content, "src/main.rs:2:     println!(\"hello\");");
         let out = call(&f, "search", json!({"pattern": "alpha", "glob": "*.txt"})).await;
         assert_eq!(out.content, "src/deep/notes.txt:1: alpha\nsrc/deep/notes.txt:3: alpha");
-        assert_eq!(call(&f, "search", json!({"pattern": "alpha", "glob": "*.rs"})).await.content, "no matches");
-        assert!(call(&f, "search", json!({"pattern": "alpha", "max_results": 1})).await.content.contains("stopped at 1"));
+        assert_eq!(
+            call(&f, "search", json!({"pattern": "alpha", "glob": "*.rs"})).await.content,
+            "no matches"
+        );
+        assert!(
+            call(&f, "search", json!({"pattern": "alpha", "max_results": 1}))
+                .await
+                .content
+                .contains("stopped at 1")
+        );
         assert!(call(&f, "search", json!({"pattern": "("})).await.is_error);
     }
 
@@ -476,19 +532,28 @@ mod tests {
         // The tool's own write counts as seen, so a second edit works without another read.
         let out = call(&f, "edit_file", edit("alpha", "omega", true)).await;
         assert!(out.content.contains("2 replacements"), "{}", out.content);
-        assert_eq!(std::fs::read_to_string(f.ws.root().join("src/deep/notes.txt")).unwrap(), "omega\ngamma\nomega\n");
+        assert_eq!(
+            std::fs::read_to_string(f.ws.root().join("src/deep/notes.txt")).unwrap(),
+            "omega\ngamma\nomega\n"
+        );
 
         // Someone else changes the file: the next edit is refused until the agent reads again.
         std::fs::write(f.ws.root().join("src/deep/notes.txt"), "changed elsewhere\n").unwrap();
         let out = call(&f, "edit_file", edit("changed", "x", false)).await;
         assert!(out.is_error && out.content.contains("changed since"), "{}", out.content);
-        assert_eq!(std::fs::read_to_string(f.ws.root().join("src/deep/notes.txt")).unwrap(), "changed elsewhere\n");
+        assert_eq!(
+            std::fs::read_to_string(f.ws.root().join("src/deep/notes.txt")).unwrap(),
+            "changed elsewhere\n"
+        );
     }
 
     #[tokio::test]
     async fn write_creates_parents_and_previews_a_diff() {
         let f = fixture();
-        let tool = file_tools(f.ws.clone()).into_iter().find(|t| t.spec().name == "write_file").unwrap();
+        let tool = file_tools(f.ws.clone())
+            .into_iter()
+            .find(|t| t.spec().name == "write_file")
+            .unwrap();
         let args = json!({"path": "docs/new/readme.md", "content": "# Title\n"});
         let diff = tool.preview(&args).await.unwrap();
         assert!(diff.contains("+# Title") && diff.contains("b/docs/new/readme.md"), "{diff}");
@@ -501,8 +566,14 @@ mod tests {
 
         let edit = file_tools(f.ws.clone()).into_iter().find(|t| t.spec().name == "edit_file").unwrap();
         call(&f, "read_file", json!({"path": "src/main.rs"})).await;
-        let diff = edit.preview(&json!({"path": "src/main.rs", "old_string": "hello", "new_string": "bye"})).await.unwrap();
-        assert!(diff.contains("-    println!(\"hello\");") && diff.contains("+    println!(\"bye\");"), "{diff}");
+        let diff = edit
+            .preview(&json!({"path": "src/main.rs", "old_string": "hello", "new_string": "bye"}))
+            .await
+            .unwrap();
+        assert!(
+            diff.contains("-    println!(\"hello\");") && diff.contains("+    println!(\"bye\");"),
+            "{diff}"
+        );
     }
 
     #[cfg(unix)]

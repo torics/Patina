@@ -21,7 +21,14 @@ async fn git(dir: &Path, args: &[&str]) -> Result<String, GitError> {
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
-        .args(["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "-c", "advice.detachedHead=false"])
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "advice.detachedHead=false",
+        ])
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("LC_ALL", "C")
@@ -34,13 +41,21 @@ async fn git(dir: &Path, args: &[&str]) -> Result<String, GitError> {
     } else {
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        Err(GitError::Failed { command: args.first().copied().unwrap_or("").to_string(), stderr: if stderr.is_empty() { stdout } else { stderr } })
+        Err(GitError::Failed {
+            command: args.first().copied().unwrap_or("").to_string(),
+            stderr: if stderr.is_empty() { stdout } else { stderr },
+        })
     }
 }
 
 pub async fn version() -> Option<String> {
     let out = Command::new("git").arg("--version").output().await.ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().trim_start_matches("git version ").to_string())
+    out.status.success().then(|| {
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .trim_start_matches("git version ")
+            .to_string()
+    })
 }
 
 /// True when `dir` is the top level of a git repository's working tree.
@@ -74,7 +89,19 @@ async fn commit(dir: &Path, message: &str, allow_empty: bool) -> Result<String, 
     let author = format!("{AUTHOR_NAME} <{AUTHOR_EMAIL}>");
     let name = format!("user.name={AUTHOR_NAME}");
     let email = format!("user.email={AUTHOR_EMAIL}");
-    let mut args = vec!["-c", &name, "-c", &email, "commit", "-q", "--no-verify", "--author", &author, "-m", message];
+    let mut args = vec![
+        "-c",
+        &name,
+        "-c",
+        &email,
+        "commit",
+        "-q",
+        "--no-verify",
+        "--author",
+        &author,
+        "-m",
+        message,
+    ];
     if allow_empty {
         args.push("--allow-empty");
     }
@@ -84,7 +111,9 @@ async fn commit(dir: &Path, message: &str, allow_empty: bool) -> Result<String, 
 
 /// Create the run's worktree on a new branch from the repository's current `HEAD`. Returns the base commit.
 pub async fn create_worktree(repo: &Path, worktree: &Path, branch: &str) -> Result<String, GitError> {
-    let base = head(repo).await.map_err(|_| GitError::Refused("the repository has no commits yet; make a first commit".into()))?;
+    let base = head(repo)
+        .await
+        .map_err(|_| GitError::Refused("the repository has no commits yet; make a first commit".into()))?;
     if let Some(parent) = worktree.parent() {
         std::fs::create_dir_all(parent).map_err(GitError::Spawn)?;
     }
@@ -103,14 +132,19 @@ pub async fn checkpoint(worktree: &Path, message: &str) -> Result<Option<String>
 }
 
 /// The diff between the base commit and the run branch, as a patch that `git apply` accepts.
-pub async fn diff(worktree: &Path, base: &str) -> Result<String, GitError> {
-    git(worktree, &["diff", "--binary", base, "HEAD"]).await
+/// `dir` is the worktree with `target` "HEAD", or the repository with `target` the run's branch.
+pub async fn diff(dir: &Path, base: &str, target: &str) -> Result<String, GitError> {
+    git(dir, &["diff", "--binary", base, target]).await
 }
 
 /// `(status letter, path)` for each file that differs from the base commit.
-pub async fn changed_files(worktree: &Path, base: &str) -> Result<Vec<(String, String)>, GitError> {
-    let out = git(worktree, &["diff", "--name-status", "--no-renames", base, "HEAD"]).await?;
-    Ok(out.lines().filter_map(|l| l.split_once('\t')).map(|(s, p)| (s.to_string(), p.to_string())).collect())
+pub async fn changed_files(dir: &Path, base: &str, target: &str) -> Result<Vec<(String, String)>, GitError> {
+    let out = git(dir, &["diff", "--name-status", "--no-renames", base, target]).await?;
+    Ok(out
+        .lines()
+        .filter_map(|l| l.split_once('\t'))
+        .map(|(s, p)| (s.to_string(), p.to_string()))
+        .collect())
 }
 
 /// Reset the worktree to a commit and remove anything created since.
@@ -132,20 +166,45 @@ pub enum Merged {
 /// Refused unless that checkout is clean. A conflicting merge is aborted, leaving the checkout as it was.
 pub async fn merge(repo: &Path, branch: &str) -> Result<Merged, GitError> {
     if !is_clean(repo).await? {
-        return Err(GitError::Refused("your checkout has uncommitted changes; commit or stash them, then merge".into()));
+        return Err(GitError::Refused(
+            "your checkout has uncommitted changes; commit or stash them, then merge".into(),
+        ));
     }
     let before = head(repo).await?;
     if git(repo, &["merge", "-q", "--ff-only", branch]).await.is_ok() {
-        return Ok(if head(repo).await? == before { Merged::AlreadyUpToDate } else { Merged::FastForward });
+        return Ok(if head(repo).await? == before {
+            Merged::AlreadyUpToDate
+        } else {
+            Merged::FastForward
+        });
     }
     let name = format!("user.name={AUTHOR_NAME}");
     let email = format!("user.email={AUTHOR_EMAIL}");
     let message = format!("Merge {branch}");
-    match git(repo, &["-c", &name, "-c", &email, "merge", "-q", "--no-ff", "--no-verify", "-m", &message, branch]).await {
+    match git(
+        repo,
+        &[
+            "-c",
+            &name,
+            "-c",
+            &email,
+            "merge",
+            "-q",
+            "--no-ff",
+            "--no-verify",
+            "-m",
+            &message,
+            branch,
+        ],
+    )
+    .await
+    {
         Ok(_) => Ok(Merged::MergeCommit),
         Err(e) => {
             let _ = git(repo, &["merge", "--abort"]).await;
-            Err(GitError::Refused(format!("the merge has conflicts and was aborted; your checkout is unchanged ({e})")))
+            Err(GitError::Refused(format!(
+                "the merge has conflicts and was aborted; your checkout is unchanged ({e})"
+            )))
         }
     }
 }
@@ -165,7 +224,11 @@ pub async fn delete_branch(repo: &Path, branch: &str) -> Result<(), GitError> {
 /// Paths of every worktree git knows for this repository.
 pub async fn list_worktrees(repo: &Path) -> Result<Vec<std::path::PathBuf>, GitError> {
     let out = git(repo, &["worktree", "list", "--porcelain"]).await?;
-    Ok(out.lines().filter_map(|l| l.strip_prefix("worktree ")).map(std::path::PathBuf::from).collect())
+    Ok(out
+        .lines()
+        .filter_map(|l| l.strip_prefix("worktree "))
+        .map(std::path::PathBuf::from)
+        .collect())
 }
 
 #[cfg(test)]
@@ -201,9 +264,12 @@ pub(crate) mod tests {
         let log = git(&wt, &["log", "-1", "--format=%an <%ae>|%s"]).await.unwrap();
         assert_eq!(log.trim(), "Patina <patina@localhost>|patina: step 2, add b");
 
-        let d = diff(&wt, &base).await.unwrap();
+        let d = diff(&wt, &base, "HEAD").await.unwrap();
         assert!(d.contains("+two") && d.contains("b.txt"), "{d}");
-        assert_eq!(changed_files(&wt, &base).await.unwrap(), vec![("M".to_string(), "a.txt".to_string()), ("A".to_string(), "b.txt".to_string())]);
+        assert_eq!(
+            changed_files(&wt, &base, "HEAD").await.unwrap(),
+            vec![("M".to_string(), "a.txt".to_string()), ("A".to_string(), "b.txt".to_string())]
+        );
 
         // The owner's checkout is untouched.
         assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "one\n");

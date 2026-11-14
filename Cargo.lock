@@ -1669,6 +1669,7 @@ dependencies = [
  "patina-core",
  "patina-providers",
  "patina-store",
+ "patina-tools",
  "reqwest",
  "rust-embed",
  "serde",

@@ -12,20 +12,17 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
-use tokio::sync::broadcast;
+use patina_core::agent::ApprovalDecision;
+use patina_core::budget::BudgetTracker;
+use patina_core::project_config::{ProjectConfig, ProjectsFile};
+use tokio::sync::{broadcast, oneshot};
 use tokio_util::sync::CancellationToken;
 
 /// Builds a provider for a profile and its resolved key. Tests swap in a mock.
-pub type ProviderFactory = Arc<
-    dyn Fn(&ProviderProfile, Option<String>) -> Result<Arc<dyn ChatProvider>, ProviderError>
-        + Send
-        + Sync,
->;
+pub type ProviderFactory = Arc<dyn Fn(&ProviderProfile, Option<String>) -> Result<Arc<dyn ChatProvider>, ProviderError> + Send + Sync>;
 
 pub fn genai_factory() -> ProviderFactory {
-    Arc::new(
-        |profile, key| Ok(Arc::new(GenaiProvider::new(profile, key)?) as Arc<dyn ChatProvider>),
-    )
+    Arc::new(|profile, key| Ok(Arc::new(GenaiProvider::new(profile, key)?) as Arc<dyn ChatProvider>))
 }
 
 /// A profile and the guarded provider built from it.
@@ -46,6 +43,9 @@ pub enum Live {
 pub struct RunHandle {
     pub tx: broadcast::Sender<Live>,
     pub cancel: CancellationToken,
+    pub budget: Arc<BudgetTracker>,
+    /// Approval requests the run is waiting on, by approval id.
+    pub pending: Mutex<HashMap<String, oneshot::Sender<ApprovalDecision>>>,
 }
 
 pub struct AppState {
@@ -61,13 +61,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(
-        paths: Paths,
-        config: Config,
-        db: Db,
-        secrets: Secrets,
-        factory: ProviderFactory,
-    ) -> Arc<AppState> {
+    pub fn new(paths: Paths, config: Config, db: Db, secrets: Secrets, factory: ProviderFactory) -> Arc<AppState> {
         Arc::new(AppState {
             paths,
             config,
@@ -96,8 +90,7 @@ impl AppState {
             return Ok(f.clone());
         }
         let file = match std::fs::read_to_string(&path) {
-            Ok(t) => ProvidersFile::parse(&t)
-                .map_err(|e| ApiError::bad_request(format!("providers.toml: {e}")))?,
+            Ok(t) => ProvidersFile::parse(&t).map_err(|e| ApiError::bad_request(format!("providers.toml: {e}")))?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => ProvidersFile::default(),
             Err(e) => return Err(ApiError::internal(e)),
         };
@@ -108,8 +101,7 @@ impl AppState {
     }
 
     pub fn save_providers(&self, file: &ProvidersFile) -> ApiResult<()> {
-        file.validate()
-            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        file.validate().map_err(|e| ApiError::bad_request(e.to_string()))?;
         let text = file.to_toml().map_err(ApiError::internal)?;
         write_atomic(&self.providers_path(), &text).map_err(ApiError::internal)?;
         *self.providers.lock().unwrap() = None;
@@ -125,12 +117,8 @@ impl AppState {
     pub async fn resolve_key(&self, profile: &ProviderProfile) -> ApiResult<Option<String>> {
         match profile.api_key_ref.as_deref() {
             None => Ok(None),
-            Some(r) if r.starts_with("secret:") => {
-                Ok(self.secrets.get(&r["secret:".len()..]).await?)
-            }
-            Some(r) => Ok(std::env::var(&r["env:".len()..])
-                .ok()
-                .filter(|v| !v.is_empty())),
+            Some(r) if r.starts_with("secret:") => Ok(self.secrets.get(&r["secret:".len()..]).await?),
+            Some(r) => Ok(std::env::var(&r["env:".len()..]).ok().filter(|v| !v.is_empty())),
         }
     }
 
@@ -147,8 +135,7 @@ impl AppState {
             return Ok((profile, prov.clone()));
         }
         let key = self.resolve_key(&profile).await?;
-        let inner =
-            (self.factory)(&profile, key).map_err(|e| ApiError::bad_request(e.to_string()))?;
+        let inner = (self.factory)(&profile, key).map_err(|e| ApiError::bad_request(e.to_string()))?;
         let guarded: Arc<dyn ChatProvider> = Arc::new(Guarded::new(
             inner,
             profile.max_concurrency,
@@ -159,6 +146,37 @@ impl AppState {
             .unwrap()
             .insert(id.to_string(), (profile.clone(), guarded.clone()));
         Ok((profile, guarded))
+    }
+
+    fn projects_path(&self) -> PathBuf {
+        self.paths.config_dir.join("projects.toml")
+    }
+
+    /// Read `projects.toml` fresh each time, so hand edits apply at once. A missing file is an empty list.
+    pub fn projects(&self) -> ApiResult<ProjectsFile> {
+        match std::fs::read_to_string(self.projects_path()) {
+            Ok(t) => ProjectsFile::parse(&t).map_err(ApiError::bad_request),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ProjectsFile::default()),
+            Err(e) => Err(ApiError::internal(e)),
+        }
+    }
+
+    pub fn save_projects(&self, file: &ProjectsFile) -> ApiResult<()> {
+        file.validate().map_err(ApiError::bad_request)?;
+        let text = file.to_toml().map_err(ApiError::internal)?;
+        write_atomic(&self.projects_path(), &text).map_err(ApiError::internal)
+    }
+
+    pub fn project(&self, id: &str) -> ApiResult<ProjectConfig> {
+        self.projects()?.get(id).cloned().ok_or_else(|| ApiError::bad_request(format!("project {id:?} does not exist")))
+    }
+
+    pub fn worktree_dir(&self, run_id: &str) -> PathBuf {
+        self.paths.data_dir.join("worktrees").join(run_id)
+    }
+
+    pub fn artifacts_dir(&self, run_id: &str) -> PathBuf {
+        self.paths.data_dir.join("artifacts").join(run_id)
     }
 
     fn agents_dir(&self) -> PathBuf {
@@ -199,8 +217,7 @@ impl AppState {
         a.validate().map_err(ApiError::bad_request)?;
         std::fs::create_dir_all(self.agents_dir()).map_err(ApiError::internal)?;
         let text = a.to_toml().map_err(ApiError::internal)?;
-        write_atomic(&self.agents_dir().join(format!("{}.toml", a.id)), &text)
-            .map_err(ApiError::internal)
+        write_atomic(&self.agents_dir().join(format!("{}.toml", a.id)), &text).map_err(ApiError::internal)
     }
 
     pub fn delete_agent(&self, id: &str) -> ApiResult<bool> {

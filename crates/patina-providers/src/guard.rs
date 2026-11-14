@@ -15,11 +15,7 @@ pub struct Guarded {
 }
 
 impl Guarded {
-    pub fn new(
-        inner: Arc<dyn ChatProvider>,
-        max_concurrency: usize,
-        idle_timeout: Duration,
-    ) -> Guarded {
+    pub fn new(inner: Arc<dyn ChatProvider>, max_concurrency: usize, idle_timeout: Duration) -> Guarded {
         Guarded {
             inner,
             permits: Arc::new(Semaphore::new(max_concurrency.max(1))),
@@ -90,11 +86,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_stops_a_slow_stream_quickly() {
         let slow = Script::text("one two three four five six").with_delay(Duration::from_secs(5));
-        let g = Guarded::new(
-            Arc::new(MockProvider::new(vec![slow])),
-            4,
-            Duration::from_secs(60),
-        );
+        let g = Guarded::new(Arc::new(MockProvider::new(vec![slow])), 4, Duration::from_secs(60));
         let cancel = CancellationToken::new();
         let mut s = g.stream(req(), cancel.clone()).await.unwrap();
         let c2 = cancel.clone();
@@ -112,34 +104,20 @@ mod tests {
     #[tokio::test]
     async fn idle_timeout_reports_error() {
         let slow = Script::text("a b").with_delay(Duration::from_millis(300));
-        let g = Guarded::new(
-            Arc::new(MockProvider::new(vec![slow])),
-            4,
-            Duration::from_millis(50),
-        );
+        let g = Guarded::new(Arc::new(MockProvider::new(vec![slow])), 4, Duration::from_millis(50));
         let mut s = g.stream(req(), CancellationToken::new()).await.unwrap();
-        assert!(matches!(
-            s.next().await.unwrap(),
-            Err(ProviderError::IdleTimeout(_))
-        ));
+        assert!(matches!(s.next().await.unwrap(), Err(ProviderError::IdleTimeout(_))));
     }
 
     #[tokio::test]
     async fn concurrency_is_limited_until_stream_drops() {
         let g = Guarded::new(
-            Arc::new(MockProvider::new(vec![
-                Script::text("a"),
-                Script::text("b"),
-            ])),
+            Arc::new(MockProvider::new(vec![Script::text("a"), Script::text("b")])),
             1,
             Duration::from_secs(5),
         );
         let first = g.stream(req(), CancellationToken::new()).await.unwrap();
-        let blocked = tokio::time::timeout(
-            Duration::from_millis(100),
-            g.stream(req(), CancellationToken::new()),
-        )
-        .await;
+        let blocked = tokio::time::timeout(Duration::from_millis(100), g.stream(req(), CancellationToken::new())).await;
         assert!(blocked.is_err(), "second stream should wait for the permit");
         drop(first);
         assert!(g.stream(req(), CancellationToken::new()).await.is_ok());

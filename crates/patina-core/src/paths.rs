@@ -20,10 +20,7 @@ impl Paths {
             Some(p) => p.to_path_buf(),
             None => dirs.as_ref()?.data_dir().to_path_buf(),
         };
-        Some(Paths {
-            config_dir,
-            data_dir,
-        })
+        Some(Paths { config_dir, data_dir })
     }
 
     pub fn config_file(&self) -> PathBuf {

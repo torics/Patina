@@ -25,12 +25,17 @@ pub struct Workspace {
 
 pub fn content_hash(bytes: &[u8]) -> u64 {
     // FNV-1a: enough to notice that a file changed between a read and an edit.
-    bytes.iter().fold(0xcbf29ce484222325u64, |h, b| (h ^ *b as u64).wrapping_mul(0x100000001b3))
+    bytes
+        .iter()
+        .fold(0xcbf29ce484222325u64, |h, b| (h ^ *b as u64).wrapping_mul(0x100000001b3))
 }
 
 impl Workspace {
     pub fn new(root: &Path) -> std::io::Result<Workspace> {
-        Ok(Workspace { root: root.canonicalize()?, seen: Mutex::default() })
+        Ok(Workspace {
+            root: root.canonicalize()?,
+            seen: Mutex::default(),
+        })
     }
 
     pub fn root(&self) -> &Path {
@@ -70,7 +75,9 @@ impl Workspace {
             }
         }
         // Resolving the existing part follows every symlink; a dangling one fails here and is refused.
-        let real = existing.canonicalize().map_err(|e| PathError::Unresolvable(shown.clone(), e.to_string()))?;
+        let real = existing
+            .canonicalize()
+            .map_err(|e| PathError::Unresolvable(shown.clone(), e.to_string()))?;
         if !real.starts_with(&self.root) {
             return Err(PathError::Escapes(shown));
         }

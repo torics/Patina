@@ -24,11 +24,7 @@ struct Daemon {
 
 async fn start(scripts: Vec<Script>, real_providers: bool) -> Daemon {
     let dir = tempfile::tempdir().unwrap();
-    let paths = Paths::resolve(
-        Some(&dir.path().join("config")),
-        Some(&dir.path().join("data")),
-    )
-    .unwrap();
+    let paths = Paths::resolve(Some(&dir.path().join("config")), Some(&dir.path().join("data"))).unwrap();
     paths.ensure().unwrap();
     let db = patina_store::Db::open(&paths.database_file()).unwrap();
     let secrets = patina_store::secrets::Secrets::new(db.clone(), [3u8; 32]);
@@ -38,20 +34,11 @@ async fn start(scripts: Vec<Script>, real_providers: bool) -> Daemon {
         let mock: Arc<dyn ChatProvider> = Arc::new(MockProvider::new(scripts));
         Arc::new(move |_, _| Ok(mock.clone()))
     };
-    let setup_token = patina_server::ensure_setup_token(&db)
-        .await
-        .unwrap()
-        .unwrap();
+    let setup_token = patina_server::ensure_setup_token(&db).await.unwrap().unwrap();
     let state = AppState::new(paths, Config::default(), db, secrets, factory);
-    let listener = patina_server::bind("127.0.0.1:0".parse().unwrap())
-        .await
-        .unwrap();
+    let listener = patina_server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    tokio::spawn(patina_server::serve(
-        listener,
-        state.clone(),
-        std::future::pending(),
-    ));
+    tokio::spawn(patina_server::serve(listener, state.clone(), std::future::pending()));
     Daemon {
         base: format!("http://127.0.0.1:{port}/api/v1"),
         origin: format!("http://127.0.0.1:{port}"),
@@ -71,9 +58,7 @@ impl Daemon {
             .request(method.clone(), format!("{}{path}", self.base))
             .header("cookie", &self.cookie);
         if method != reqwest::Method::GET {
-            r = r
-                .header("origin", &self.origin)
-                .header("x-patina-csrf", &self.csrf);
+            r = r.header("origin", &self.origin).header("x-patina-csrf", &self.csrf);
         }
         r
     }
@@ -102,47 +87,29 @@ impl Daemon {
         self.take_session(r).await;
     }
     async fn take_session(&mut self, r: reqwest::Response) {
-        let set = r
-            .headers()
-            .get("set-cookie")
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_string();
-        assert!(
-            set.contains("HttpOnly") && set.contains("SameSite=Strict"),
-            "{set}"
-        );
+        let set = r.headers().get("set-cookie").unwrap().to_str().unwrap().to_string();
+        assert!(set.contains("HttpOnly") && set.contains("SameSite=Strict"), "{set}");
         self.cookie = set.split(';').next().unwrap().to_string();
-        self.csrf = r.json::<Value>().await.unwrap()["csrf"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        self.csrf = r.json::<Value>().await.unwrap()["csrf"].as_str().unwrap().to_string();
     }
     /// A provider with a stored key and an agent that uses it.
     async fn seed(&self) {
-        let (s, _) = self.post("/providers", json!({"id": "p1", "kind": "openai_compatible", "base_url": "http://127.0.0.1:9/v1"})).await;
-        assert_eq!(s, 200);
         let (s, _) = self
-            .send(
-                reqwest::Method::PUT,
-                "/providers/p1/secret",
-                json!({"value": KEY}),
+            .post(
+                "/providers",
+                json!({"id": "p1", "kind": "openai_compatible", "base_url": "http://127.0.0.1:9/v1"}),
             )
             .await;
         assert_eq!(s, 200);
+        let (s, _) = self.send(reqwest::Method::PUT, "/providers/p1/secret", json!({"value": KEY})).await;
+        assert_eq!(s, 200);
         let (s, b) = self
-            .post(
-                "/agents",
-                json!({"id": "a1", "name": "Agent", "provider": "p1", "model": "m1"}),
-            )
+            .post("/agents", json!({"id": "a1", "name": "Agent", "provider": "p1", "model": "m1"}))
             .await;
         assert_eq!(s, 200, "{b}");
     }
     async fn run(&self, prompt: &str) -> String {
-        let (s, b) = self
-            .post("/runs", json!({"agent_id": "a1", "prompt": prompt}))
-            .await;
+        let (s, b) = self.post("/runs", json!({"agent_id": "a1", "prompt": prompt})).await;
         assert_eq!(s, 200, "{b}");
         b["id"].as_str().unwrap().to_string()
     }
@@ -157,12 +124,7 @@ impl Daemon {
         panic!("run never reached {want}");
     }
     /// Read an SSE stream to its end. Returns persisted event ids, their JSON, and the live delta text.
-    async fn events(
-        &self,
-        id: &str,
-        query: &str,
-        last_event_id: Option<&str>,
-    ) -> (Vec<i64>, Vec<Value>, String) {
+    async fn events(&self, id: &str, query: &str, last_event_id: Option<&str>) -> (Vec<i64>, Vec<Value>, String) {
         let mut r = self.req(reqwest::Method::GET, &format!("/runs/{id}/events{query}"));
         if let Some(l) = last_event_id {
             r = r.header("last-event-id", l);
@@ -176,12 +138,7 @@ impl Daemon {
         }
         let (mut ids, mut events, mut deltas) = (vec![], vec![], String::new());
         for block in body.split("\n\n") {
-            let field = |name: &str| {
-                block
-                    .lines()
-                    .find_map(|l| l.strip_prefix(name))
-                    .map(|v| v.trim().to_string())
-            };
+            let field = |name: &str| block.lines().find_map(|l| l.strip_prefix(name)).map(|v| v.trim().to_string());
             let Some(data) = field("data:") else { continue };
             let data: Value = serde_json::from_str(&data).unwrap();
             if field("event:").as_deref() == Some("delta") {
@@ -206,12 +163,7 @@ fn text_of(events: &[Value]) -> String {
 #[tokio::test]
 async fn every_route_except_health_and_auth_needs_a_session() {
     let d = start(vec![], false).await;
-    let r = d
-        .http
-        .get(format!("{}/healthz", d.origin))
-        .send()
-        .await
-        .unwrap();
+    let r = d.http.get(format!("{}/healthz", d.origin)).send().await.unwrap();
     assert_eq!(r.status(), 200);
     for path in [
         "/system",
@@ -245,11 +197,7 @@ async fn every_route_except_health_and_auth_needs_a_session() {
     assert_eq!(s, 200);
     let b: Value = serde_json::from_str(&b).unwrap();
     assert_eq!(
-        (
-            b["setup_required"].clone(),
-            b["authenticated"].clone(),
-            b["csrf"].clone()
-        ),
+        (b["setup_required"].clone(), b["authenticated"].clone(), b["csrf"].clone()),
         (json!(true), json!(false), Value::Null)
     );
 }
@@ -269,13 +217,7 @@ async fn bad_host_header_is_rejected() {
     }
     let r = d.http.get(format!("{}/", d.origin)).send().await.unwrap();
     assert_eq!(r.status(), 200);
-    let csp = r
-        .headers()
-        .get("content-security-policy")
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_string();
+    let csp = r.headers().get("content-security-policy").unwrap().to_str().unwrap().to_string();
     assert!(csp.contains("default-src 'self'") && csp.contains("frame-ancestors 'none'"));
 }
 
@@ -306,11 +248,7 @@ async fn setup_token_login_logout_and_lockout() {
 
     let (s, _) = d.post("/auth/logout", json!({})).await;
     assert_eq!(s, 200);
-    assert_eq!(
-        d.get("/providers").await.0,
-        401,
-        "the old cookie no longer works"
-    );
+    assert_eq!(d.get("/providers").await.0, 401, "the old cookie no longer works");
 
     let login = |pw: &str| {
         d.http
@@ -325,11 +263,7 @@ async fn setup_token_login_logout_and_lockout() {
         assert_eq!(login("nope nope nope").await.unwrap().status(), 401);
     }
     let locked = login(PASSWORD).await.unwrap();
-    assert_eq!(
-        locked.status(),
-        429,
-        "locked out even with the right password"
-    );
+    assert_eq!(locked.status(), 429, "locked out even with the right password");
     assert!(locked.headers().get("retry-after").is_some());
     d.take_session(ok).await;
     assert_eq!(d.get("/providers").await.0, 200);
@@ -405,22 +339,9 @@ async fn no_response_or_file_contains_a_stored_key() {
     let id = d.run("say hello").await;
     d.wait_status(&id, "completed").await;
 
-    let (_, put_body) = d
-        .send(
-            reqwest::Method::PUT,
-            "/providers/p1/secret",
-            json!({"value": KEY}),
-        )
-        .await;
+    let (_, put_body) = d.send(reqwest::Method::PUT, "/providers/p1/secret", json!({"value": KEY})).await;
     let mut bodies = vec![put_body.to_string()];
-    for path in [
-        "/providers",
-        "/agents",
-        "/runs",
-        "/system",
-        "/auth/session",
-        "/provider-presets",
-    ] {
+    for path in ["/providers", "/agents", "/runs", "/system", "/auth/session", "/provider-presets"] {
         bodies.push(d.get(path).await.1);
     }
     bodies.push(d.get(&format!("/runs/{id}")).await.1);
@@ -449,10 +370,7 @@ async fn no_response_or_file_contains_a_stored_key() {
         );
     }
     for b in &bodies {
-        assert!(
-            !b.contains(KEY) && !b.contains("SECRETVALUE"),
-            "a response leaked the key: {b}"
-        );
+        assert!(!b.contains(KEY) && !b.contains("SECRETVALUE"), "a response leaked the key: {b}");
     }
     // Only the last four characters are shown.
     let providers: Value = serde_json::from_str(&bodies[1]).unwrap();
@@ -463,10 +381,7 @@ async fn no_response_or_file_contains_a_stored_key() {
     assert!(toml.contains("secret:p1") && !toml.contains("SECRETVALUE"));
     for f in ["patina.db", "patina.db-wal"] {
         let raw = std::fs::read(d.dir.path().join("data").join(f)).unwrap_or_default();
-        assert!(
-            !raw.windows(11).any(|w| w == b"SECRETVALUE"),
-            "{f} holds the key in clear text"
-        );
+        assert!(!raw.windows(11).any(|w| w == b"SECRETVALUE"), "{f} holds the key in clear text");
     }
 }
 
@@ -479,19 +394,11 @@ async fn chat_streams_and_replays_from_any_point() {
     d.wait_status(&id, "completed").await;
 
     let (ids, events, _) = d.events(&id, "", None).await;
-    assert_eq!(
-        ids,
-        (1..=ids.len() as i64).collect::<Vec<_>>(),
-        "sequence numbers are gapless"
-    );
+    assert_eq!(ids, (1..=ids.len() as i64).collect::<Vec<_>>(), "sequence numbers are gapless");
     let kinds: Vec<&str> = events.iter().map(|e| e["type"].as_str().unwrap()).collect();
     assert_eq!(kinds.first(), Some(&"run_started"));
     assert_eq!(kinds.last(), Some(&"run_finished"));
-    assert!(
-        kinds.contains(&"agent_started")
-            && kinds.contains(&"usage")
-            && kinds.contains(&"agent_finished")
-    );
+    assert!(kinds.contains(&"agent_started") && kinds.contains(&"usage") && kinds.contains(&"agent_finished"));
     assert_eq!(text_of(&events), "the quick brown fox jumps");
     assert_eq!(events.last().unwrap()["payload"]["status"], "completed");
 
@@ -506,21 +413,13 @@ async fn chat_streams_and_replays_from_any_point() {
     let (_, run) = d.get(&format!("/runs/{id}")).await;
     let run: Value = serde_json::from_str(&run).unwrap();
     assert_eq!(run["usage"]["output_tokens"], 5);
-    assert_eq!(
-        run["usage"]["cost_usd"],
-        Value::Null,
-        "no price configured, so cost is unknown"
-    );
+    assert_eq!(run["usage"]["cost_usd"], Value::Null, "no price configured, so cost is unknown");
 }
 
 #[tokio::test]
 async fn following_a_live_run_has_no_gap_and_no_duplicate() {
     let words = "one two three four five six seven eight nine ten eleven twelve";
-    let mut d = start(
-        vec![Script::text(words).with_delay(Duration::from_millis(60))],
-        false,
-    )
-    .await;
+    let mut d = start(vec![Script::text(words).with_delay(Duration::from_millis(60))], false).await;
     d.sign_in().await;
     d.seed().await;
     let id = d.run("count").await;
@@ -538,10 +437,7 @@ async fn following_a_live_run_has_no_gap_and_no_duplicate() {
         "late follower sees each later event exactly once"
     );
     assert_eq!(text_of(&events), words);
-    assert_eq!(
-        deltas, words,
-        "live deltas carry the whole text as it streams"
-    );
+    assert_eq!(deltas, words, "live deltas carry the whole text as it streams");
     assert!(
         events.iter().filter(|e| e["type"] == "text").count() >= 2,
         "text is persisted in batches while streaming"
@@ -552,95 +448,52 @@ async fn following_a_live_run_has_no_gap_and_no_duplicate() {
 
 #[tokio::test]
 async fn cancel_stops_a_run_mid_stream_within_a_second() {
-    let slow =
-        Script::text("a b c d e f g h i j k l m n o p").with_delay(Duration::from_millis(400));
+    let slow = Script::text("a b c d e f g h i j k l m n o p").with_delay(Duration::from_millis(400));
     let mut d = start(vec![slow], false).await;
     d.sign_in().await;
     d.seed().await;
     let id = d.run("slow").await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     let started = std::time::Instant::now();
-    assert_eq!(
-        d.post(&format!("/runs/{id}/cancel"), json!({})).await.0,
-        200
-    );
+    assert_eq!(d.post(&format!("/runs/{id}/cancel"), json!({})).await.0, 200);
     d.wait_status(&id, "cancelled").await;
-    assert!(
-        started.elapsed() < Duration::from_secs(1),
-        "took {:?}",
-        started.elapsed()
-    );
+    assert!(started.elapsed() < Duration::from_secs(1), "took {:?}", started.elapsed());
     let (_, events, _) = d.events(&id, "", None).await;
     assert_eq!(events.last().unwrap()["payload"]["status"], "cancelled");
-    assert_eq!(
-        d.post(&format!("/runs/{id}/cancel"), json!({})).await.0,
-        409,
-        "already finished"
-    );
+    assert_eq!(d.post(&format!("/runs/{id}/cancel"), json!({})).await.0, 409, "already finished");
     assert!(d.state.runs.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
 async fn provider_failure_ends_the_run_as_failed_with_the_reason() {
     use patina_core::provider::ProviderError;
-    let mut d = start(
-        vec![Script::failing_open(ProviderError::Fatal(
-            "HTTP 401: bad key".into(),
-        ))],
-        false,
-    )
-    .await;
+    let mut d = start(vec![Script::failing_open(ProviderError::Fatal("HTTP 401: bad key".into()))], false).await;
     d.sign_in().await;
     d.seed().await;
     let id = d.run("x").await;
     d.wait_status(&id, "failed").await;
     let (_, events, _) = d.events(&id, "", None).await;
     assert!(events.iter().any(|e| e["type"] == "error"));
-    assert!(
-        events.last().unwrap()["payload"]["error"]
-            .as_str()
-            .unwrap()
-            .contains("401")
-    );
+    assert!(events.last().unwrap()["payload"]["error"].as_str().unwrap().contains("401"));
 }
 
 #[tokio::test]
 async fn crud_validation_and_errors_are_json() {
     let mut d = start(vec![], false).await;
     d.sign_in().await;
-    let (s, b) = d
-        .post("/providers", json!({"id": "bad id", "kind": "openai"}))
-        .await;
+    let (s, b) = d.post("/providers", json!({"id": "bad id", "kind": "openai"})).await;
     assert_eq!((s, b["error"]["code"].as_str()), (400, Some("bad_request")));
-    let (s, _) = d
-        .post(
-            "/providers",
-            json!({"id": "c", "kind": "openai_compatible"}),
-        )
-        .await;
+    let (s, _) = d.post("/providers", json!({"id": "c", "kind": "openai_compatible"})).await;
     assert_eq!(s, 400, "openai_compatible needs a base_url");
     d.seed().await;
+    assert_eq!(d.post("/providers", json!({"id": "p1", "kind": "ollama"})).await.0, 409);
     assert_eq!(
-        d.post("/providers", json!({"id": "p1", "kind": "ollama"}))
-            .await
-            .0,
-        409
-    );
-    assert_eq!(
-        d.post(
-            "/agents",
-            json!({"id": "a2", "name": "x", "provider": "missing", "model": "m"})
-        )
-        .await
-        .0,
-        400
-    );
-    assert_eq!(
-        d.post("/runs", json!({"agent_id": "missing", "prompt": "x"}))
+        d.post("/agents", json!({"id": "a2", "name": "x", "provider": "missing", "model": "m"}))
             .await
             .0,
         400
     );
+    assert_eq!(d.post("/runs", json!({"agent_id": "missing", "prompt": "x"})).await.0, 400);
     assert_eq!(d.get("/runs/nope").await.0, 404);
     assert_eq!(d.get("/nope").await.0, 404);
     // Edits made in the file by hand show up through the API.
@@ -651,22 +504,9 @@ async fn crud_validation_and_errors_are_json() {
     tokio::time::sleep(Duration::from_millis(20)).await;
     std::fs::write(&path, text).unwrap();
     let (_, b) = d.get("/providers").await;
-    assert_eq!(
-        serde_json::from_str::<Value>(&b).unwrap()[0]["max_concurrency"],
-        9
-    );
-    assert_eq!(
-        d.send(reqwest::Method::DELETE, "/agents/a1", json!({}))
-            .await
-            .0,
-        200
-    );
-    assert_eq!(
-        d.send(reqwest::Method::DELETE, "/providers/p1", json!({}))
-            .await
-            .0,
-        200
-    );
+    assert_eq!(serde_json::from_str::<Value>(&b).unwrap()[0]["max_concurrency"], 9);
+    assert_eq!(d.send(reqwest::Method::DELETE, "/agents/a1", json!({})).await.0, 200);
+    assert_eq!(d.send(reqwest::Method::DELETE, "/providers/p1", json!({})).await.0, 200);
     assert_eq!(d.get("/providers").await.1, "[]");
 }
 
@@ -708,16 +548,11 @@ async fn fake_openai() -> (u16, Arc<std::sync::Mutex<Vec<String>>>) {
                 };
                 let auth = head
                     .lines()
-                    .find_map(|l| {
-                        l.to_ascii_lowercase()
-                            .starts_with("authorization:")
-                            .then(|| l.to_string())
-                    })
+                    .find_map(|l| l.to_ascii_lowercase().starts_with("authorization:").then(|| l.to_string()))
                     .unwrap_or_default();
                 seen.lock().unwrap().push(auth);
                 let resp = if head.starts_with("GET /v1/models") {
-                    let body =
-                        r#"{"object":"list","data":[{"id":"local-model"},{"id":"other-model"}]}"#;
+                    let body = r#"{"object":"list","data":[{"id":"local-model"},{"id":"other-model"}]}"#;
                     format!(
                         "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                         body.len()
@@ -750,33 +585,21 @@ async fn real_genai_provider_chats_with_a_local_openai_compatible_endpoint() {
     d.sign_in().await;
     let base = format!("http://127.0.0.1:{port}/v1");
     assert_eq!(
-        d.post(
-            "/providers",
-            json!({"id": "local", "kind": "openai_compatible", "base_url": base})
-        )
-        .await
-        .0,
+        d.post("/providers", json!({"id": "local", "kind": "openai_compatible", "base_url": base}))
+            .await
+            .0,
         200
     );
     assert_eq!(
-        d.send(
-            reqwest::Method::PUT,
-            "/providers/local/secret",
-            json!({"value": KEY})
-        )
-        .await
-        .0,
+        d.send(reqwest::Method::PUT, "/providers/local/secret", json!({"value": KEY}))
+            .await
+            .0,
         200
     );
     // Only a base URL, a key and a model id were needed.
     let (s, models) = d.get("/providers/local/models").await;
-    assert_eq!(
-        (s, models.as_str()),
-        (200, r#"["local-model","other-model"]"#)
-    );
-    let (s, test) = d
-        .post("/providers/local/test", json!({"model": "local-model"}))
-        .await;
+    assert_eq!((s, models.as_str()), (200, r#"["local-model","other-model"]"#));
+    let (s, test) = d.post("/providers/local/test", json!({"model": "local-model"})).await;
     assert_eq!(s, 200);
     assert_eq!(
         (test["ok"].clone(), test["reply"].clone()),
@@ -800,19 +623,13 @@ async fn real_genai_provider_chats_with_a_local_openai_compatible_endpoint() {
     assert_eq!(text_of(&events), "local reply");
     let usage = events.iter().find(|e| e["type"] == "usage").unwrap();
     assert_eq!(
-        (
-            usage["payload"]["input_tokens"].clone(),
-            usage["payload"]["estimated"].clone()
-        ),
+        (usage["payload"]["input_tokens"].clone(), usage["payload"]["estimated"].clone()),
         (json!(4), json!(false))
     );
     assert!(!format!("{events:?}").contains("SECRETVALUE"));
     // The key reached the provider, and only the provider.
     assert!(
-        seen.lock()
-            .unwrap()
-            .iter()
-            .all(|a| a.ends_with(&format!("Bearer {KEY}"))),
+        seen.lock().unwrap().iter().all(|a| a.ends_with(&format!("Bearer {KEY}"))),
         "{:?}",
         seen.lock().unwrap()
     );

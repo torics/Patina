@@ -93,10 +93,7 @@ impl ProvidersFile {
         for p in &self.providers {
             p.validate()?;
             if !seen.insert(p.id.as_str()) {
-                return Err(ProviderConfigError::Invalid(format!(
-                    "duplicate provider id {:?}",
-                    p.id
-                )));
+                return Err(ProviderConfigError::Invalid(format!("duplicate provider id {:?}", p.id)));
             }
         }
         Ok(())
@@ -109,21 +106,14 @@ impl ProvidersFile {
 
 /// Ids become file names, secret names and URL segments, so keep them boring.
 pub fn valid_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 64
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 impl ProviderProfile {
     pub fn validate(&self) -> Result<(), ProviderConfigError> {
         let bad = |m: String| Err(ProviderConfigError::Invalid(m));
         if !valid_id(&self.id) {
-            return bad(format!(
-                "invalid provider id {:?}: use letters, digits, - and _",
-                self.id
-            ));
+            return bad(format!("invalid provider id {:?}: use letters, digits, - and _", self.id));
         }
         if self.max_concurrency == 0 {
             return bad("max_concurrency must be at least 1".into());
@@ -134,17 +124,12 @@ impl ProviderProfile {
         if let Some(u) = &self.base_url
             && !(u.starts_with("http://") || u.starts_with("https://"))
         {
-            return bad(format!(
-                "base_url {u:?} must start with http:// or https://"
-            ));
+            return bad(format!("base_url {u:?} must start with http:// or https://"));
         }
         if let Some(r) = &self.api_key_ref {
-            let ok = r.strip_prefix("secret:").is_some_and(valid_id)
-                || r.strip_prefix("env:").is_some_and(|v| !v.is_empty());
+            let ok = r.strip_prefix("secret:").is_some_and(valid_id) || r.strip_prefix("env:").is_some_and(|v| !v.is_empty());
             if !ok {
-                return bad(format!(
-                    "api_key_ref {r:?} must be secret:<name> or env:<VAR>"
-                ));
+                return bad(format!("api_key_ref {r:?} must be secret:<name> or env:<VAR>"));
             }
         }
         Ok(())

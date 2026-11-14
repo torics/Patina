@@ -17,13 +17,7 @@ fn var(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
-async fn smoke(
-    label: &str,
-    kind: ProviderKind,
-    base_url: Option<String>,
-    key: Option<String>,
-    model: String,
-) {
+async fn smoke(label: &str, kind: ProviderKind, base_url: Option<String>, key: Option<String>, model: String) {
     let profile = ProviderProfile {
         id: label.into(),
         kind,
@@ -34,26 +28,18 @@ async fn smoke(
         prices: Default::default(),
     };
     let models = patina_providers::models::list_models(&profile, key.as_deref()).await;
-    println!(
-        "[{label}] model list: {:?}",
-        models.as_ref().map(|m| m.len())
-    );
+    println!("[{label}] model list: {:?}", models.as_ref().map(|m| m.len()));
     let provider = GenaiProvider::new(&profile, key).unwrap();
     let req = ChatRequest {
         model,
         system: None,
-        messages: vec![Message::user(
-            "Reply with one short sentence about rust on iron.",
-        )],
+        messages: vec![Message::user("Reply with one short sentence about rust on iron.")],
         tools: vec![],
         temperature: None,
         max_output_tokens: Some(100),
         reasoning: None,
     };
-    let mut s = provider
-        .stream(req, CancellationToken::new())
-        .await
-        .unwrap();
+    let mut s = provider.stream(req, CancellationToken::new()).await.unwrap();
     let (mut text, mut deltas, mut usage, mut stopped) = (String::new(), 0, None, false);
     while let Some(ev) = s.next().await {
         match ev.unwrap() {
@@ -87,18 +73,12 @@ async fn live_providers_stream_text() {
         ("OPENAI", ProviderKind::Openai),
         ("GEMINI", ProviderKind::Gemini),
     ] {
-        if let (Some(key), Some(model)) = (
-            var(&format!("PATINA_LIVE_{name}_KEY")),
-            var(&format!("PATINA_LIVE_{name}_MODEL")),
-        ) {
+        if let (Some(key), Some(model)) = (var(&format!("PATINA_LIVE_{name}_KEY")), var(&format!("PATINA_LIVE_{name}_MODEL"))) {
             smoke(name, kind, None, Some(key), model).await;
             ran += 1;
         }
     }
-    if let (Some(url), Some(model)) = (
-        var("PATINA_LIVE_COMPAT_URL"),
-        var("PATINA_LIVE_COMPAT_MODEL"),
-    ) {
+    if let (Some(url), Some(model)) = (var("PATINA_LIVE_COMPAT_URL"), var("PATINA_LIVE_COMPAT_MODEL")) {
         smoke(
             "COMPAT",
             ProviderKind::OpenaiCompatible,
@@ -109,9 +89,6 @@ async fn live_providers_stream_text() {
         .await;
         ran += 1;
     }
-    assert!(
-        ran > 0,
-        "PATINA_LIVE_TESTS is set but no provider variables were found"
-    );
+    assert!(ran > 0, "PATINA_LIVE_TESTS is set but no provider variables were found");
     println!("{ran} live provider(s) passed");
 }

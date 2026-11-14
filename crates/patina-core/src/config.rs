@@ -92,10 +92,7 @@ mod tests {
     #[test]
     fn defaults_match_brief() {
         let c = Config::default();
-        assert_eq!(
-            (c.bind.as_str(), c.port, c.preview_port),
-            ("127.0.0.1", 7878, 7879)
-        );
+        assert_eq!((c.bind.as_str(), c.port, c.preview_port), ("127.0.0.1", 7878, 7879));
     }
 
     #[test]
@@ -107,10 +104,7 @@ mod tests {
 
     #[test]
     fn newer_schema_is_refused() {
-        assert!(matches!(
-            Config::parse("schema_version = 99"),
-            Err(ConfigError::TooNew(99))
-        ));
+        assert!(matches!(Config::parse("schema_version = 99"), Err(ConfigError::TooNew(99))));
     }
 
     #[test]

@@ -36,6 +36,19 @@ impl Script {
         }
     }
 
+    /// A turn that calls tools: `(call id, tool name, arguments)`.
+    pub fn tool_calls(calls: &[(&str, &str, serde_json::Value)]) -> Script {
+        let mut events = vec![];
+        for (id, name, args) in calls {
+            events.push(Ok(StreamEvent::ToolCallStart { id: id.to_string(), name: name.to_string() }));
+            events.push(Ok(StreamEvent::ToolCallArgsDelta { id: id.to_string(), fragment: args.to_string() }));
+            events.push(Ok(StreamEvent::ToolCallEnd { id: id.to_string() }));
+        }
+        events.push(Ok(StreamEvent::Usage { input_tokens: 10, output_tokens: 10, cached_tokens: 0 }));
+        events.push(Ok(StreamEvent::Stop(StopReason::ToolUse)));
+        Script { events, ..Script::default() }
+    }
+
     pub fn with_delay(mut self, d: Duration) -> Script {
         self.delay = d;
         self
@@ -77,9 +90,12 @@ impl ChatProvider for MockProvider {
         cancel: CancellationToken,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
         self.requests.lock().unwrap().push(req);
-        let script = self.scripts.lock().unwrap().pop_front().ok_or_else(|| {
-            ProviderError::Fatal("mock provider has no scripted turn left".into())
-        })?;
+        let script = self
+            .scripts
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| ProviderError::Fatal("mock provider has no scripted turn left".into()))?;
         if let Some(e) = script.open_error {
             return Err(e);
         }
