@@ -44,6 +44,22 @@ system_prompt = ""
 temperature = 0.2          # optional
 max_output_tokens = 8000   # optional
 context_window = 128000
-tools = []
+tools = ["list_files", "read_file", "search", "edit_file", "write_file"]
 can_delegate_to = []
 ```
+
+`tools` lists what the agent may use in a run that has a project: `list_files`, `read_file`, `search`, `edit_file`, `write_file`. An empty list means the agent can only talk.
+
+## projects.toml
+
+```toml
+schema_version = 1
+
+[[project]]
+id = "my-project"
+name = "My project"
+path = "/home/you/code/my-project"   # absolute; the top level of a git repository
+policy = "confirm_all"               # confirm_all | auto_edit | autopilot
+```
+
+`policy` decides what asks for approval once a sandbox is active. While there is none, every edit asks whatever is set here. The file is read on every use, so a hand edit applies to the next run.

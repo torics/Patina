@@ -2,7 +2,7 @@
 
 A lean, self-hosted, model-agnostic agent workbench in one Rust binary. The daemon serves a browser UI, holds your API keys, calls any LLM provider on your behalf and stores every run so you can watch and review it from any device.
 
-Status: **M1 (auth and chat)**. You can set a password, add providers and agents, chat with streaming, cancel, and replay any run after a reload. Tools, worktrees and the sandbox arrive in M2 and M3. See `DECISIONS.md`.
+Status: **M2 (tools and worktrees)**. You can set a password, add providers and agents, and chat with streaming. An agent can also work in a project: it reads, searches and edits files in its own git worktree, every edit waits for your approval with a diff, each changing step is a checkpoint you can roll back to, and nothing reaches your branch until you merge. Commands and the sandbox arrive in M3. See `DECISIONS.md`.
 
 ## Build and run
 
@@ -17,6 +17,20 @@ cargo build --release
 The first run prints the address (`http://127.0.0.1:7878`) and a one-time setup token. Open the address, enter the token, choose a password, then add a provider and an agent in Settings.
 
 Other commands: `patina reset-password` prints a new setup token, `patina version` prints the version. `serve` accepts `--bind`, `--port`, `--config-dir`, `--data-dir` and `--log-format human|json`.
+
+## Work in a project
+
+A project is a folder that is the top level of a git repository. Add one in Settings, give an agent tools, then pick the project in the composer. The run gets a worktree under the data folder on a new branch `patina/run-<id>`, based on your current commit. Uncommitted changes in your checkout are not included.
+
+Every edit shows its diff and waits for Approve, Deny (with a reason the agent sees) or Approve with changed arguments. When the run stops, the Changes section shows the diff and offers: merge into your branch (your checkout must be clean), download a patch, keep the branch, or discard. Patina never pushes.
+
+The same from a terminal, without the daemon:
+
+```sh
+patina run --project ~/code/my-project --team assistant "Add a section about testing to the README"
+```
+
+It prints the run's events and asks for each approval on the terminal. `--team` takes an agent id until teams arrive. Limits: `--max-steps`, `--max-tokens`, `--max-cost-usd`, `--max-wall-clock-s`. `--json` prints one event per line. `--yes` is refused until a sandbox exists. Exit codes: 0 completed, 1 failed, 3 an approval was needed and no terminal was attached, 4 a limit was reached, 130 stopped.
 
 Config lives in `~/.config/patina/` and data in `~/.local/share/patina/` unless overridden. See `docs/config.md`.
 
