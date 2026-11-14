@@ -31,6 +31,7 @@ button.danger { background: var(--danger); } button.link.danger { background: no
 .muted, small { color: var(--muted); }
 .error { color: var(--danger); } .warn { color: var(--warn); } .ok { color: var(--accent); }
 .notice { margin: 0; padding: .5rem 1rem; background: var(--panel); border-bottom: 1px solid var(--danger); color: var(--danger); }
+.steps { list-style: decimal; }
 .steps li { color: var(--muted); margin-left: 1rem; } .steps .current { color: var(--text); font-weight: 600; } .steps .done { text-decoration: line-through; }
 .chat { display: grid; grid-template-columns: 16rem 1fr; gap: 1rem; }
 .run { display: grid; text-align: left; width: 100%; color: var(--text); border-radius: 6px; }

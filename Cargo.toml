@@ -36,6 +36,7 @@ patina-core = { path = "crates/patina-core" }
 patina-store = { path = "crates/patina-store" }
 patina-server = { path = "crates/patina-server" }
 patina-providers = { path = "crates/patina-providers" }
+patina-tools = { path = "crates/patina-tools" }
 
 [profile.release]
 opt-level = "s"

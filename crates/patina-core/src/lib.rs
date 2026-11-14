@@ -9,6 +9,7 @@ pub mod events;
 pub mod paths;
 pub mod provider;
 pub mod provider_config;
+pub mod tool;
 
 pub use config::{Config, ConfigError};
 pub use paths::Paths;
