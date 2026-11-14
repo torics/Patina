@@ -42,7 +42,7 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test --a
 ./scripts/check-budgets.sh                                # binary size, idle memory, UI size
 ```
 
-Live provider smoke tests are opt-in and need your keys. The variables are listed at the top of `crates/patina-providers/tests/live.rs`.
+Live provider tests are opt-in and need your keys. They stream a reply, then make a tool call and use its result. The variables are listed at the top of `crates/patina-providers/tests/live.rs`.
 
 ## Development
 
