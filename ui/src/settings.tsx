@@ -273,10 +273,15 @@ const POLICIES: { value: PolicyMode; label: string }[] = [
   { value: "autopilot", label: "Never ask" },
 ];
 
+/** The policies to offer. "Never ask" is offered only with a sandbox; a project that already has it keeps showing it. */
+function policyChoices(current?: PolicyMode) {
+  return POLICIES.filter((p) => p.value !== "autopilot" || sandboxLevel.value !== "none" || current === "autopilot");
+}
+
 function ProjectForm({ onDone }: { onDone: () => void }) {
   const [path, setPath] = useState("");
   const [name, setName] = useState("");
-  const [policy, setPolicy] = useState<PolicyMode>("confirm_all");
+  const [policy, setPolicy] = useState<PolicyMode>("auto_edit");
   const [offerInit, setOfferInit] = useState(false);
   const [initGit, setInitGit] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -307,7 +312,7 @@ function ProjectForm({ onDone }: { onDone: () => void }) {
       <label>
         Approvals
         <select name="policy" value={policy} onChange={(e) => setPolicy(e.currentTarget.value as PolicyMode)}>
-          {POLICIES.map((p) => (
+          {policyChoices().map((p) => (
             <option value={p.value}>{p.label}</option>
           ))}
         </select>
@@ -344,7 +349,7 @@ function ProjectRow({ p }: { p: ProjectConfig }) {
             .catch(report)
         }
       >
-        {POLICIES.map((o) => (
+        {policyChoices(p.policy).map((o) => (
           <option value={o.value}>{o.label}</option>
         ))}
       </select>

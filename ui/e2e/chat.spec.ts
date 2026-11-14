@@ -158,7 +158,9 @@ test("run an agent in a project, approve its edit after reading the diff, and me
   await page.getByRole("button", { name: "Add project" }).click();
   await page.getByLabel(/^Folder/).fill(repo);
   await page.getByRole("button", { name: "Save" }).click();
-  await expect(page.getByLabel("Approvals for repo")).toHaveValue("confirm_all");
+  // The default policy applies edits without asking, and "Never ask" is not offered without a sandbox.
+  await expect(page.getByLabel("Approvals for repo")).toHaveValue("auto_edit");
+  await expect(page.getByLabel("Approvals for repo").locator("option")).toHaveCount(2);
 
   // Start a run in it.
   await page.getByRole("button", { name: "Chat" }).click();
@@ -166,7 +168,7 @@ test("run an agent in a project, approve its edit after reading the diff, and me
   await page.getByLabel("Prompt", { exact: true }).fill("Write the notes");
   await page.getByRole("button", { name: "Send" }).click();
 
-  // The edit waits: the diff is on screen and nothing is written yet.
+  // There is no sandbox, so the edit waits in spite of the policy: the diff is on screen and nothing is written yet.
   const approval = page.getByRole("group", { name: "Approval for write_file" });
   await expect(approval).toBeVisible();
   await expect(page.locator(".status")).toHaveText("waiting approval");
