@@ -42,6 +42,24 @@ button.danger { background: var(--danger); } button.link.danger { background: no
 .usage { display: block; margin-top: .5rem; color: var(--muted); font-size: .85rem; }
 .status { text-transform: capitalize; font-weight: 600; flex: 1; }
 .status.failed, .status.cancelled { color: var(--danger); } .status.completed { color: var(--accent); }
+.status.budget_exceeded, .status.interrupted { color: var(--danger); } .status.waiting_approval { color: var(--warn); }
+pre { margin: .5rem 0; padding: .6rem .75rem; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; overflow: auto; max-height: 28rem; font: 13px/1.45 ui-monospace, monospace; white-space: pre; }
+code { font: 13px ui-monospace, monospace; }
+details { margin: .5rem 0; } summary { cursor: pointer; color: var(--muted); }
+fieldset { border: 1px solid var(--line); border-radius: 6px; margin: 0 0 .75rem; padding: .5rem .75rem; } legend { color: var(--muted); font-size: .9rem; }
+label.check { display: flex; gap: .5rem; align-items: center; margin: .25rem 0; color: var(--text); } label.check input { width: auto; }
+.row select { width: auto; } .row label { margin: 0; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 0 .75rem; }
+.tool { border-left: 3px solid var(--line); padding: .25rem 0 .25rem .75rem; margin: .6rem 0; }
+.tool.waiting { border-color: var(--warn); } .tool.done { border-color: var(--accent); } .tool.failed, .tool.denied { border-color: var(--danger); }
+.tool .target { flex: 1; overflow-wrap: anywhere; } .tool .state { color: var(--muted); font-size: .85rem; }
+.approval { border: 1px solid var(--warn); border-radius: 6px; padding: .6rem .75rem; margin: .5rem 0; } .approval p { margin: 0 0 .5rem; }
+.checkpoint { color: var(--muted); font-size: .85rem; margin: .4rem 0; }
+.changes { margin-top: 1rem; } .files, .checkpoints { margin: .5rem 0; padding-left: 1.5rem; } .files { list-style: none; padding: 0; }
+.file { display: inline-block; min-width: 4.5rem; color: var(--muted); } .file.A { color: var(--accent); } .file.D { color: var(--danger); }
+h4 { margin: .75rem 0 .25rem; font-size: .95rem; }
+section { margin-bottom: 1.5rem; }
+a { color: var(--accent); }
 @media (max-width: 640px) {
   .chat { grid-template-columns: 1fr; }
   .chat aside { order: 2; }

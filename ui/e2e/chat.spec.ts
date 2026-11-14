@@ -1,7 +1,8 @@
-// Smoke test against the real binary: set up, add a provider and agent, chat, reload and replay.
+// Smoke tests against the real binary: set up, add a provider and agent, chat, reload and replay; then run an
+// agent in a project, approve its edit after reading the diff, and merge the result.
 import { expect, test } from "@playwright/test";
-import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,34 +14,68 @@ let fake: Server;
 let base = "";
 let token = "";
 let fakeUrl = "";
+let repo = "";
+
+// The second test uses the provider and agent the first one creates.
+test.describe.configure({ mode: "serial" });
+
+function chunk(delta: object, finish: string | null, usage?: object) {
+  return `data: ${JSON.stringify({ id: "1", object: "chat.completion.chunk", model: "local-model", choices: [{ index: 0, delta, finish_reason: finish }], usage })}\n\n`;
+}
 
 test.beforeAll(async () => {
-  // A local OpenAI-compatible endpoint that streams a short reply, word by word.
+  // A local OpenAI-compatible endpoint.
   fake = createServer((req, res) => {
     if (req.url?.startsWith("/v1/models")) {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ object: "list", data: [{ id: "local-model" }] }));
       return;
     }
-    res.writeHead(200, { "content-type": "text/event-stream" });
-    const words = ["Hello ", "from ", "the ", "local ", "model."];
-    let i = 0;
-    const timer = setInterval(() => {
-      if (i < words.length) {
-        const chunk = { id: "1", object: "chat.completion.chunk", model: "local-model", choices: [{ index: 0, delta: { content: words[i++] }, finish_reason: null }] };
-        res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-      } else {
-        clearInterval(timer);
-        const end = { id: "1", object: "chat.completion.chunk", model: "local-model", choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 5, completion_tokens: 5, total_tokens: 10 } };
-        res.end(`data: ${JSON.stringify(end)}\n\ndata: [DONE]\n\n`);
+    let raw = "";
+    req.on("data", (d) => (raw += d));
+    req.on("end", () => {
+      const body = JSON.parse(raw || "{}");
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      const usage = { prompt_tokens: 5, completion_tokens: 5, total_tokens: 10 };
+      const messages: { role: string }[] = body.messages ?? [];
+      if (body.tools?.length && !messages.some((m) => m.role === "tool")) {
+        // A run in a project: ask to write a file. The daemon must get the owner's approval first.
+        const args = JSON.stringify({ path: "NOTES.md", content: "written by the agent\n" });
+        res.write(chunk({ tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "write_file", arguments: args } }] }, null));
+        res.end(chunk({}, "tool_calls", usage) + "data: [DONE]\n\n");
+        return;
       }
-    }, 80);
+      if (body.tools?.length) {
+        res.write(chunk({ content: "The notes are written." }, null));
+        res.end(chunk({}, "stop", usage) + "data: [DONE]\n\n");
+        return;
+      }
+      // A plain chat: stream a short reply, word by word.
+      const words = ["Hello ", "from ", "the ", "local ", "model."];
+      let i = 0;
+      const timer = setInterval(() => {
+        if (i < words.length) {
+          res.write(chunk({ content: words[i++] }, null));
+        } else {
+          clearInterval(timer);
+          res.end(chunk({}, "stop", usage) + "data: [DONE]\n\n");
+        }
+      }, 80);
+    });
   });
   await new Promise<void>((r) => fake.listen(0, "127.0.0.1", r));
   const addr = fake.address();
   fakeUrl = `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : 0}/v1`;
 
   const dir = mkdtempSync(join(tmpdir(), "patina-e2e-"));
+  // A real repository for the project test.
+  repo = join(dir, "repo");
+  mkdirSync(repo);
+  writeFileSync(join(repo, "README.md"), "hello\n");
+  const git = (...args: string[]) => execFileSync("git", ["-c", "user.name=e2e", "-c", "user.email=e2e@example.com", ...args], { cwd: repo });
+  git("init", "-q", "-b", "main");
+  git("add", ".");
+  git("commit", "-q", "-m", "first");
   daemon = spawn(BIN, ["serve", "--port", "0", "--config-dir", join(dir, "c"), "--data-dir", join(dir, "d")]);
   let out = "";
   await new Promise<void>((resolve, reject) => {
@@ -111,4 +146,52 @@ test("set up, connect a provider, chat, and replay after a reload", async ({ pag
   // Sign out, then the app asks for the password again.
   await page.getByRole("button", { name: "Sign out" }).click();
   await expect(page.getByText("Sign in to continue.")).toBeVisible();
+});
+
+test("run an agent in a project, approve its edit after reading the diff, and merge", async ({ page }) => {
+  await page.goto(base);
+  await page.getByLabel("Password", { exact: true }).fill("a long enough password");
+  await page.getByRole("button", { name: "Sign in" }).click();
+
+  // Register the repository as a project.
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Add project" }).click();
+  await page.getByLabel(/^Folder/).fill(repo);
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByLabel("Approvals for repo")).toHaveValue("confirm_all");
+
+  // Start a run in it.
+  await page.getByRole("button", { name: "Chat" }).click();
+  await page.getByLabel("Project").selectOption("repo");
+  await page.getByLabel("Prompt", { exact: true }).fill("Write the notes");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  // The edit waits: the diff is on screen and nothing is written yet.
+  const approval = page.getByRole("group", { name: "Approval for write_file" });
+  await expect(approval).toBeVisible();
+  await expect(page.locator(".status")).toHaveText("waiting approval");
+  await expect(page.locator(".tool pre.diff")).toContainText("+written by the agent");
+  expect(existsSync(join(repo, "NOTES.md"))).toBe(false);
+
+  await approval.getByRole("button", { name: "Approve", exact: true }).click();
+  await expect(page.getByText("You approved this.")).toBeVisible();
+  await expect(page.locator(".bubble.agent .text")).toHaveText("The notes are written.");
+  await expect(page.locator(".status")).toHaveText("completed");
+  await expect(page.getByText(/^Checkpoint after step 1/)).toBeVisible();
+
+  // The change is on the run's branch, shown as a diff, and still not in the owner's checkout.
+  const changes = page.getByRole("region", { name: "Changes" });
+  await expect(changes.locator(".files")).toHaveText("added NOTES.md");
+  await expect(changes.locator("pre.diff")).toContainText("+written by the agent");
+  expect(existsSync(join(repo, "NOTES.md"))).toBe(false);
+
+  // A reload replays the whole run, approval included.
+  await page.reload();
+  await expect(page.getByText("You approved this.")).toBeVisible();
+  await expect(page.locator(".status")).toHaveText("completed");
+
+  await page.getByRole("region", { name: "Changes" }).getByRole("button", { name: "Merge into your branch" }).click();
+  await expect(page.getByText("Merged into main.")).toBeVisible();
+  await expect(page.getByText(/These changes were merged/)).toBeVisible();
+  expect(readFileSync(join(repo, "NOTES.md"), "utf8")).toBe("written by the agent\n");
 });

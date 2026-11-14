@@ -49,14 +49,20 @@ pub async fn create(db: &Db, id: &str, run_id: &str, seq: i64, tool_call: &Value
 
 pub async fn get(db: &Db, id: &str) -> Result<Option<ApprovalRow>, StoreError> {
     let id = id.to_string();
-    db.call(move |c| Ok(c.query_row(&format!("SELECT {COLS} FROM approvals WHERE id = ?1"), [id], from_row).optional()?)).await
+    db.call(move |c| {
+        Ok(c.query_row(&format!("SELECT {COLS} FROM approvals WHERE id = ?1"), [id], from_row)
+            .optional()?)
+    })
+    .await
 }
 
 /// Approvals with the given status (or all), oldest first.
 pub async fn list(db: &Db, status: Option<&str>) -> Result<Vec<ApprovalRow>, StoreError> {
     let status = status.map(str::to_string);
     db.call(move |c| {
-        let mut s = c.prepare(&format!("SELECT {COLS} FROM approvals WHERE ?1 IS NULL OR status = ?1 ORDER BY created_at, id"))?;
+        let mut s = c.prepare(&format!(
+            "SELECT {COLS} FROM approvals WHERE ?1 IS NULL OR status = ?1 ORDER BY created_at, id"
+        ))?;
         let rows = s.query_map([status], from_row)?.collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     })
@@ -80,7 +86,10 @@ pub async fn resolve(db: &Db, id: &str, status: &str, decision: &Value) -> Resul
 pub async fn expire_for_run(db: &Db, run_id: &str) -> Result<(), StoreError> {
     let run_id = run_id.to_string();
     db.call(move |c| {
-        c.execute("UPDATE approvals SET status = 'expired', decided_at = ?2 WHERE run_id = ?1 AND status = 'pending'", params![run_id, now_ms()])?;
+        c.execute(
+            "UPDATE approvals SET status = 'expired', decided_at = ?2 WHERE run_id = ?1 AND status = 'pending'",
+            params![run_id, now_ms()],
+        )?;
         Ok(())
     })
     .await
@@ -95,14 +104,24 @@ mod tests {
     async fn approvals_are_stored_listed_and_answered_once() {
         let t = tempfile::tempdir().unwrap();
         let db = Db::open(&t.path().join("p.db")).unwrap();
-        crate::runs::create_run(&db, "r1", "site", "agent:a", "p", &json!({})).await.unwrap();
-        create(&db, "ap1", "r1", 4, &json!({"name": "write_file", "args": {"path": "a"}})).await.unwrap();
+        crate::runs::create_run(&db, "r1", "site", "agent:a", "p", &json!({}))
+            .await
+            .unwrap();
+        create(&db, "ap1", "r1", 4, &json!({"name": "write_file", "args": {"path": "a"}}))
+            .await
+            .unwrap();
         create(&db, "ap2", "r1", 9, &json!({"name": "edit_file"})).await.unwrap();
         assert_eq!(list(&db, Some("pending")).await.unwrap().len(), 2);
         assert!(resolve(&db, "ap1", "approved", &json!({"action": "approve"})).await.unwrap());
-        assert!(!resolve(&db, "ap1", "denied", &json!({})).await.unwrap(), "a second answer is ignored");
+        assert!(
+            !resolve(&db, "ap1", "denied", &json!({})).await.unwrap(),
+            "a second answer is ignored"
+        );
         let a = get(&db, "ap1").await.unwrap().unwrap();
-        assert_eq!((a.status.as_str(), a.tool_call["name"].as_str(), a.decided_at.is_some()), ("approved", Some("write_file"), true));
+        assert_eq!(
+            (a.status.as_str(), a.tool_call["name"].as_str(), a.decided_at.is_some()),
+            ("approved", Some("write_file"), true)
+        );
         expire_for_run(&db, "r1").await.unwrap();
         assert_eq!(get(&db, "ap2").await.unwrap().unwrap().status, "expired");
         assert!(list(&db, Some("pending")).await.unwrap().is_empty());

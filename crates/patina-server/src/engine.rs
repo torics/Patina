@@ -37,7 +37,9 @@ fn host_err(e: impl std::fmt::Display) -> HostError {
 #[async_trait]
 impl RunHost for StoreHost {
     async fn append(&self, agent_id: Option<&str>, kind: EventType, payload: Value) -> Result<i64, HostError> {
-        let ev = store::append_event(&self.db, &self.run_id, agent_id, kind.as_str(), payload).await.map_err(host_err)?;
+        let ev = store::append_event(&self.db, &self.run_id, agent_id, kind.as_str(), payload)
+            .await
+            .map_err(host_err)?;
         let seq = ev.seq;
         self.last_seq.store(seq, Ordering::SeqCst);
         let _ = self.handle.tx.send(Live::Event(ev));
@@ -53,7 +55,9 @@ impl RunHost for StoreHost {
     }
 
     async fn save_message(&self, agent_id: &str, idx: i64, message: &Message) -> Result<(), HostError> {
-        store::save_message(&self.db, &self.run_id, agent_id, idx, message).await.map_err(host_err)
+        store::save_message(&self.db, &self.run_id, agent_id, idx, message)
+            .await
+            .map_err(host_err)
     }
 
     async fn request_approval(&self, agent_id: &str, call: &ToolCallInfo, diff: Option<String>) -> Result<ApprovalDecision, HostError> {
@@ -63,8 +67,12 @@ impl RunHost for StoreHost {
         self.handle.pending.lock().unwrap().insert(id.clone(), tx);
         let record = json!({"agent_id": agent_id, "id": call.id, "name": call.name, "args": call.args, "diff": diff});
         // The row exists before the event is broadcast, so a client that reacts to the event can always answer it.
-        approvals::create(&self.db, &id, &self.run_id, self.last_seq.load(Ordering::SeqCst) + 1, &record).await.map_err(host_err)?;
-        store::set_status(&self.db, &self.run_id, RunStatus::WaitingApproval.as_str()).await.map_err(host_err)?;
+        approvals::create(&self.db, &id, &self.run_id, self.last_seq.load(Ordering::SeqCst) + 1, &record)
+            .await
+            .map_err(host_err)?;
+        store::set_status(&self.db, &self.run_id, RunStatus::WaitingApproval.as_str())
+            .await
+            .map_err(host_err)?;
         self.append(
             Some(agent_id),
             EventType::ApprovalRequested,
@@ -72,14 +80,20 @@ impl RunHost for StoreHost {
         )
         .await?;
         let decision = rx.await.map_err(|_| HostError("the approval was abandoned".into()))?;
-        store::set_status(&self.db, &self.run_id, RunStatus::Running.as_str()).await.map_err(host_err)?;
+        store::set_status(&self.db, &self.run_id, RunStatus::Running.as_str())
+            .await
+            .map_err(host_err)?;
         let (action, note) = match &decision {
             ApprovalDecision::Approve => ("approve", None),
             ApprovalDecision::ApproveEdited(_) => ("edit", None),
             ApprovalDecision::Deny(n) => ("deny", Some(n.clone())),
         };
-        self.append(Some(agent_id), EventType::ApprovalResolved, json!({"approval_id": id, "tool_call_id": call.id, "action": action, "note": note}))
-            .await?;
+        self.append(
+            Some(agent_id),
+            EventType::ApprovalResolved,
+            json!({"approval_id": id, "tool_call_id": call.id, "action": action, "note": note}),
+        )
+        .await?;
         Ok(decision)
     }
 
@@ -87,14 +101,30 @@ impl RunHost for StoreHost {
         let Some(worktree) = &self.worktree else { return Ok(()) };
         let message = format!("patina: step {step}, {summary}");
         if let Some(commit) = git::checkpoint(worktree, &message).await.map_err(host_err)? {
-            store::add_checkpoint(&self.db, &self.run_id, step as i64, &commit, summary).await.map_err(host_err)?;
-            self.append(Some(agent_id), EventType::Checkpoint, json!({"step": step, "commit": commit, "summary": summary})).await?;
+            store::add_checkpoint(&self.db, &self.run_id, step as i64, &commit, summary)
+                .await
+                .map_err(host_err)?;
+            self.append(
+                Some(agent_id),
+                EventType::Checkpoint,
+                json!({"step": step, "commit": commit, "summary": summary}),
+            )
+            .await?;
         }
         Ok(())
     }
 
     async fn save_artifact(&self, name: &str, content: &str) -> Result<String, HostError> {
-        let safe: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' }).collect();
+        let safe: String = name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
         let (dir, body) = (self.artifacts.clone(), content.to_string());
         let file = dir.join(&safe);
         tokio::task::spawn_blocking(move || {
@@ -126,7 +156,9 @@ pub async fn start_run(st: &Arc<AppState>, input: NewRun) -> ApiResult<(store::R
     if input.prompt.trim().is_empty() {
         return Err(ApiError::bad_request("the prompt is empty"));
     }
-    let agent = st.get_agent(&input.agent_id)?.ok_or_else(|| ApiError::bad_request(format!("agent {:?} does not exist", input.agent_id)))?;
+    let agent = st
+        .get_agent(&input.agent_id)?
+        .ok_or_else(|| ApiError::bad_request(format!("agent {:?} does not exist", input.agent_id)))?;
     let (profile, provider) = st.provider(&agent.provider).await?;
     let project = match input.project_id.as_deref().filter(|p| !p.is_empty()) {
         Some(id) => Some(st.project(id)?),
@@ -163,19 +195,43 @@ pub async fn start_run(st: &Arc<AppState>, input: NewRun) -> ApiResult<(store::R
     if let Some(project) = &project {
         let repo = PathBuf::from(&project.path);
         if !git::is_repo_root(&repo).await {
-            return Err(ApiError::bad_request(format!("{} is not the top level of a git repository", project.path)));
+            return Err(ApiError::bad_request(format!(
+                "{} is not the top level of a git repository",
+                project.path
+            )));
         }
         plan.dirty_checkout = !git::is_clean(&repo).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
         // The branch name uses the random tail of the id: the head of a UUIDv7 is a timestamp.
-        let short: String = run_id.chars().filter(|c| *c != '-').rev().take(8).collect::<Vec<_>>().into_iter().rev().collect();
+        let short: String = run_id
+            .chars()
+            .filter(|c| *c != '-')
+            .rev()
+            .take(8)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         let branch = format!("patina/run-{short}");
         let worktree = st.worktree_dir(&run_id);
-        let base = git::create_worktree(&repo, &worktree, &branch).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
-        store::create_run(&st.db, &run_id, project_id, &format!("agent:{}", agent.id), &input.prompt, &budgets_json).await?;
+        let base = git::create_worktree(&repo, &worktree, &branch)
+            .await
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        store::create_run(
+            &st.db,
+            &run_id,
+            project_id,
+            &format!("agent:{}", agent.id),
+            &input.prompt,
+            &budgets_json,
+        )
+        .await?;
         store::set_worktree(&st.db, &run_id, Some(&worktree.to_string_lossy()), Some(&branch), Some(&base)).await?;
         let ws = Arc::new(Workspace::new(&worktree).map_err(ApiError::internal)?);
         // The agent sees only the tools named in its `tools` list.
-        plan.tools = file_tools(ws).into_iter().filter(|t| agent.tools.contains(&t.spec().name)).collect();
+        plan.tools = file_tools(ws)
+            .into_iter()
+            .filter(|t| agent.tools.contains(&t.spec().name))
+            .collect();
         plan.policy = project.policy;
         plan.project_instructions = std::fs::read_to_string(worktree.join("AGENTS.md")).ok();
         plan.worktree = Some(worktree);
@@ -191,7 +247,9 @@ pub async fn start_run(st: &Arc<AppState>, input: NewRun) -> ApiResult<(store::R
         pending: Mutex::new(HashMap::new()),
     });
     st.runs.lock().unwrap().insert(run_id.clone(), handle.clone());
-    let row = store::get_run(&st.db, &run_id).await?.ok_or_else(|| ApiError::internal("run vanished"))?;
+    let row = store::get_run(&st.db, &run_id)
+        .await?
+        .ok_or_else(|| ApiError::internal("run vanished"))?;
     tokio::spawn(drive(st.clone(), run_id, plan, handle.clone()));
     Ok((row, handle))
 }
@@ -208,7 +266,9 @@ async fn drive(st: Arc<AppState>, run_id: String, plan: Plan, handle: Arc<RunHan
     };
     let result: Result<Outcome, String> = async {
         let he = |e: HostError| e.to_string();
-        store::set_status(&st.db, &run_id, RunStatus::Running.as_str()).await.map_err(|e| e.to_string())?;
+        store::set_status(&st.db, &run_id, RunStatus::Running.as_str())
+            .await
+            .map_err(|e| e.to_string())?;
         host.append(
             None,
             EventType::RunStarted,
@@ -245,8 +305,16 @@ async fn drive(st: Arc<AppState>, run_id: String, plan: Plan, handle: Arc<RunHan
         let usage = serde_json::to_value(handle.budget.usage()).map_err(|e| e.to_string())?;
         approvals::expire_for_run(&st.db, &run_id).await.map_err(|e| e.to_string())?;
         store::set_usage(&st.db, &run_id, &usage).await.map_err(|e| e.to_string())?;
-        store::set_status(&st.db, &run_id, status.as_str()).await.map_err(|e| e.to_string())?;
-        host.append(None, EventType::RunFinished, json!({"status": status.as_str(), "error": error, "usage": usage})).await.map_err(|e| e.to_string())?;
+        store::set_status(&st.db, &run_id, status.as_str())
+            .await
+            .map_err(|e| e.to_string())?;
+        host.append(
+            None,
+            EventType::RunFinished,
+            json!({"status": status.as_str(), "error": error, "usage": usage}),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
         Ok::<_, String>(())
     };
     if let Err(e) = finish.await {
@@ -257,9 +325,15 @@ async fn drive(st: Arc<AppState>, run_id: String, plan: Plan, handle: Arc<RunHan
 
 /// Deliver the owner's answer to the run that is waiting for it.
 pub async fn answer_approval(st: &AppState, run_id: &str, approval_id: &str, answer: ApprovalAnswer) -> ApiResult<()> {
-    let row = approvals::get(&st.db, approval_id).await?.filter(|a| a.run_id == run_id).ok_or_else(|| ApiError::not_found("approval"))?;
+    let row = approvals::get(&st.db, approval_id)
+        .await?
+        .filter(|a| a.run_id == run_id)
+        .ok_or_else(|| ApiError::not_found("approval"))?;
     if row.status != "pending" {
-        return Err(ApiError::conflict("already_answered", format!("this approval is already {}", row.status)));
+        return Err(ApiError::conflict(
+            "already_answered",
+            format!("this approval is already {}", row.status),
+        ));
     }
     let decision = match answer.action {
         ApprovalAction::Approve => ApprovalDecision::Approve,
@@ -269,15 +343,32 @@ pub async fn answer_approval(st: &AppState, run_id: &str, approval_id: &str, ans
             _ => return Err(ApiError::bad_request("an edit needs the changed arguments as an object in `args`")),
         },
     };
-    let handle = st.runs.lock().unwrap().get(run_id).cloned().ok_or_else(|| ApiError::conflict("not_active", "the run is not active"))?;
-    let sender = handle.pending.lock().unwrap().remove(approval_id).ok_or_else(|| ApiError::conflict("not_active", "the run is no longer waiting for this approval"))?;
-    let status = if answer.action == ApprovalAction::Deny { "denied" } else { "approved" };
+    let handle = st
+        .runs
+        .lock()
+        .unwrap()
+        .get(run_id)
+        .cloned()
+        .ok_or_else(|| ApiError::conflict("not_active", "the run is not active"))?;
+    let sender = handle
+        .pending
+        .lock()
+        .unwrap()
+        .remove(approval_id)
+        .ok_or_else(|| ApiError::conflict("not_active", "the run is no longer waiting for this approval"))?;
+    let status = if answer.action == ApprovalAction::Deny {
+        "denied"
+    } else {
+        "approved"
+    };
     let record = serde_json::to_value(&answer).map_err(ApiError::internal)?;
     // Only one answer wins, even when two devices answer at the same moment.
     if !approvals::resolve(&st.db, approval_id, status, &record).await? {
         return Err(ApiError::conflict("already_answered", "this approval was already answered"));
     }
-    sender.send(decision).map_err(|_| ApiError::conflict("not_active", "the run stopped before the answer arrived"))
+    sender
+        .send(decision)
+        .map_err(|_| ApiError::conflict("not_active", "the run stopped before the answer arrived"))
 }
 
 /// Budgets as stored on a run row; old rows without budgets get the defaults.

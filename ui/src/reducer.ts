@@ -1,5 +1,43 @@
 // Turns a run's event stream into what the timeline shows. Pure, so it is unit tested.
 import type { Event } from "./api/generated/Event";
+import type { Usage } from "./api/generated/Usage";
+
+export interface TextItem {
+  kind: "text";
+  step: number;
+  /** One entry per model attempt; a failed attempt is kept but marked discarded. */
+  attempt: number;
+  text: string;
+  discarded: boolean;
+}
+
+export interface Approval {
+  id: string;
+  /** `pending` until the owner answers, then the answer. */
+  state: "pending" | "approve" | "edit" | "deny" | "expired";
+  note: string | null;
+}
+
+export interface ToolItem {
+  kind: "tool";
+  id: string;
+  name: string;
+  args: Record<string, any>;
+  /** Unified diff of an edit, shown before it is applied. */
+  diff: string | null;
+  state: "running" | "waiting" | "done" | "failed" | "denied";
+  result: string | null;
+  artifact: string | null;
+  approval: Approval | null;
+}
+
+export interface CheckpointItem {
+  kind: "checkpoint";
+  step: number;
+  summary: string;
+}
+
+export type Item = TextItem | ToolItem | CheckpointItem;
 
 export interface AgentBlock {
   agentId: string;
@@ -7,8 +45,8 @@ export interface AgentBlock {
   model: string;
   startedAt: number;
   finishedAt: number | null;
-  /** Persisted text, one entry per model attempt; a failed attempt is kept but marked discarded. */
-  segments: { attempt: number; text: string; discarded: boolean }[];
+  /** Text, tool calls and checkpoints in the order they happened. */
+  items: Item[];
   reasoning: string;
   /** Live text that is not persisted yet. */
   pending: string;
@@ -22,12 +60,20 @@ export interface Timeline {
   prompt: string;
   status: string;
   error: string | null;
+  hasWorkspace: boolean;
+  /** The owner's checkout had uncommitted changes that the run does not include. */
+  dirtyCheckout: boolean;
   blocks: AgentBlock[];
-  usage: { input_tokens: number; output_tokens: number; estimated: boolean; cost_usd: number | null } | null;
+  /** Running total while the run is live, final total once it is over. */
+  usage: Usage | null;
+  /** Rollbacks the owner made, by the step rolled back to (0 is the starting point). */
+  rollbacks: number[];
+  /** Goes up whenever the run's files may have changed, so views of the changes know to reload. */
+  changes: number;
 }
 
 export function emptyTimeline(): Timeline {
-  return { lastSeq: 0, prompt: "", status: "queued", error: null, blocks: [], usage: null };
+  return { lastSeq: 0, prompt: "", status: "queued", error: null, hasWorkspace: false, dirtyCheckout: false, blocks: [], usage: null, rollbacks: [], changes: 0 };
 }
 
 function lastBlock(t: Timeline, agentId: string | null): AgentBlock | undefined {
@@ -35,6 +81,12 @@ function lastBlock(t: Timeline, agentId: string | null): AgentBlock | undefined 
     if (t.blocks[i].agentId === agentId) return t.blocks[i];
   }
   return undefined;
+}
+
+/** Replace the tool item with this call id, if the block has it. */
+function updateTool(block: AgentBlock | undefined, id: unknown, change: (item: ToolItem) => ToolItem) {
+  if (!block) return;
+  block.items = block.items.map((i) => (i.kind === "tool" && i.id === id ? change(i) : i));
 }
 
 /** Apply one persisted event. Events at or below `lastSeq` are duplicates and are ignored. */
@@ -47,6 +99,8 @@ export function applyEvent(t: Timeline, ev: Event): Timeline {
     case "run_started":
       next.prompt = String(p.prompt ?? "");
       next.status = "running";
+      next.hasWorkspace = Boolean(p.has_workspace);
+      next.dirtyCheckout = Boolean(p.uncommitted_changes_not_included);
       break;
     case "agent_started":
       next.blocks.push({
@@ -55,7 +109,7 @@ export function applyEvent(t: Timeline, ev: Event): Timeline {
         model: String(p.model ?? ""),
         startedAt: ev.ts,
         finishedAt: null,
-        segments: [],
+        items: [],
         reasoning: "",
         pending: "",
         errors: [],
@@ -65,12 +119,15 @@ export function applyEvent(t: Timeline, ev: Event): Timeline {
       break;
     case "text":
       if (block) {
+        const step = Number(p.step ?? 0);
         const attempt = Number(p.attempt ?? 0);
-        const segments = block.segments.map((s) => ({ ...s }));
-        const seg = segments.find((s) => s.attempt === attempt);
-        if (seg) seg.text += String(p.text ?? "");
-        else segments.push({ attempt, text: String(p.text ?? ""), discarded: false });
-        block.segments = segments;
+        const text = String(p.text ?? "");
+        const last = block.items[block.items.length - 1];
+        if (last?.kind === "text" && last.step === step && last.attempt === attempt) {
+          block.items = [...block.items.slice(0, -1), { ...last, text: last.text + text }];
+        } else {
+          block.items = [...block.items, { kind: "text", step, attempt, text, discarded: false }];
+        }
         // Everything streamed live so far is inside this persisted batch.
         block.pending = "";
       }
@@ -78,17 +135,55 @@ export function applyEvent(t: Timeline, ev: Event): Timeline {
     case "reasoning":
       if (block) block.reasoning += String(p.text ?? "");
       break;
-    case "error":
+    case "tool_call":
       if (block) {
+        block.items = [...block.items, { kind: "tool", id: String(p.id), name: String(p.name ?? ""), args: p.args ?? {}, diff: null, state: "running", result: null, artifact: null, approval: null }];
+        block.pending = "";
+      }
+      break;
+    case "approval_requested":
+      updateTool(block, p.tool_call_id, (i) => ({ ...i, state: "waiting", diff: p.diff ?? null, approval: { id: String(p.approval_id), state: "pending", note: null } }));
+      next.status = "waiting_approval";
+      break;
+    case "approval_resolved":
+      updateTool(block, p.tool_call_id, (i) => ({
+        ...i,
+        state: p.action === "deny" ? "denied" : "running",
+        approval: { id: String(p.approval_id), state: p.action, note: p.note ?? null },
+      }));
+      next.status = "running";
+      break;
+    case "tool_result":
+      updateTool(block, p.id, (i) => ({
+        ...i,
+        state: i.state === "denied" ? "denied" : p.is_error ? "failed" : "done",
+        result: String(p.content ?? ""),
+        artifact: p.artifact ?? null,
+      }));
+      break;
+    case "checkpoint":
+      if (block) block.items = [...block.items, { kind: "checkpoint", step: Number(p.step), summary: String(p.summary ?? "") }];
+      next.changes += 1;
+      break;
+    case "rollback":
+      next.rollbacks = [...next.rollbacks, Number(p.step)];
+      next.changes += 1;
+      break;
+    case "error":
+      // Reaching a budget ends the run; the run's own status and error say so.
+      if (block && !p.budget) {
         block.errors = [...block.errors, { message: String(p.message ?? ""), retrying: Boolean(p.retrying) }];
         if (p.retrying) {
-          block.segments = block.segments.map((s) => (s.attempt === Number(p.discarded_attempt) ? { ...s, discarded: true } : s));
+          const step = Number(p.step ?? 0);
+          const discarded = Number(p.discarded_attempt);
+          block.items = block.items.map((i) => (i.kind === "text" && i.step === step && i.attempt === discarded ? { ...i, discarded: true } : i));
           block.pending = "";
         }
       }
       break;
     case "usage":
       if (block) block.usage = { input: Number(p.input_tokens ?? 0), output: Number(p.output_tokens ?? 0), estimated: Boolean(p.estimated) };
+      if (p.total) next.usage = p.total;
       break;
     case "agent_finished":
       if (block) {
@@ -100,7 +195,12 @@ export function applyEvent(t: Timeline, ev: Event): Timeline {
     case "run_finished":
       next.status = String(p.status ?? "completed");
       next.error = p.error ? String(p.error) : null;
-      next.usage = p.usage ?? null;
+      next.usage = p.usage ?? next.usage;
+      // A request nobody answered before the run ended can no longer be answered.
+      for (const b of next.blocks) {
+        b.items = b.items.map((i) => (i.kind === "tool" && i.approval?.state === "pending" ? { ...i, state: "failed", approval: { ...i.approval, state: "expired" } } : i));
+      }
+      next.changes += 1;
       break;
   }
   return next;
@@ -115,9 +215,14 @@ export function applyDelta(t: Timeline, agentId: string, text: string): Timeline
   return { ...t, blocks };
 }
 
-/** The text to show for a block: kept attempts plus the live tail. */
+/** All the text a block shows: kept attempts plus the live tail. */
 export function visibleText(b: AgentBlock): string {
-  return b.segments.filter((s) => !s.discarded).map((s) => s.text).join("") + b.pending;
+  return b.items.map((i) => (i.kind === "text" && !i.discarded ? i.text : "")).join("") + b.pending;
+}
+
+/** The tool calls that are waiting for the owner's answer. */
+export function waitingApprovals(t: Timeline): ToolItem[] {
+  return t.blocks.flatMap((b) => b.items.filter((i): i is ToolItem => i.kind === "tool" && i.approval?.state === "pending"));
 }
 
 export function isTerminal(status: string): boolean {

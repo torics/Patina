@@ -40,7 +40,9 @@ pub async fn register(st: &AppState, input: NewProject) -> ApiResult<ProjectConf
     if !path.is_absolute() {
         return Err(ApiError::bad_request("give the folder as an absolute path"));
     }
-    let path = path.canonicalize().map_err(|e| ApiError::bad_request(format!("cannot open {}: {e}", path.display())))?;
+    let path = path
+        .canonicalize()
+        .map_err(|e| ApiError::bad_request(format!("cannot open {}: {e}", path.display())))?;
     if !path.is_dir() {
         return Err(ApiError::bad_request(format!("{} is not a folder", path.display())));
     }
@@ -49,26 +51,44 @@ pub async fn register(st: &AppState, input: NewProject) -> ApiResult<ProjectConf
         if let Ok(own) = own.canonicalize()
             && (path.starts_with(&own) || own.starts_with(&path))
         {
-            return Err(ApiError::bad_request("a project cannot contain or sit inside Patina's own config or data folder"));
+            return Err(ApiError::bad_request(
+                "a project cannot contain or sit inside Patina's own config or data folder",
+            ));
         }
     }
     if !git::is_repo_root(&path).await {
         if !input.init_git {
-            return Err(ApiError::conflict("not_a_repository", format!("{} is not the top level of a git repository; Patina can run `git init` there", path.display())));
+            return Err(ApiError::conflict(
+                "not_a_repository",
+                format!(
+                    "{} is not the top level of a git repository; Patina can run `git init` there",
+                    path.display()
+                ),
+            ));
         }
         git::init(&path).await.map_err(|e| ApiError::bad_request(e.to_string()))?;
     }
-    let folder = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "project".into());
+    let folder = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "project".into());
     let name = input.name.filter(|n| !n.trim().is_empty()).unwrap_or(folder);
     let id = input.id.filter(|i| !i.is_empty()).unwrap_or_else(|| slug(&name));
     if !valid_id(&id) {
-        return Err(ApiError::bad_request(format!("invalid project id {id:?}: use letters, digits, - and _")));
+        return Err(ApiError::bad_request(format!(
+            "invalid project id {id:?}: use letters, digits, - and _"
+        )));
     }
     let mut file = st.projects()?;
     if file.get(&id).is_some() {
         return Err(ApiError::conflict("exists", format!("project {id:?} already exists")));
     }
-    let project = ProjectConfig { id, name, path: path.to_string_lossy().to_string(), policy: input.policy.unwrap_or_default() };
+    let project = ProjectConfig {
+        id,
+        name,
+        path: path.to_string_lossy().to_string(),
+        policy: input.policy.unwrap_or_default(),
+    };
     file.projects.push(project.clone());
     st.save_projects(&file)?;
     Ok(project)
@@ -77,12 +97,17 @@ pub async fn register(st: &AppState, input: NewProject) -> ApiResult<ProjectConf
 /// Change a project's name or policy. The folder of a project does not change; register a new one instead.
 pub async fn update(State(st): St, Path(id): Path<String>, Json(patch): Json<Value>) -> ApiResult<Json<ProjectConfig>> {
     let mut file = st.projects()?;
-    let slot = file.projects.iter_mut().find(|p| p.id == id).ok_or_else(|| ApiError::not_found("project"))?;
+    let slot = file
+        .projects
+        .iter_mut()
+        .find(|p| p.id == id)
+        .ok_or_else(|| ApiError::not_found("project"))?;
     if let Some(name) = patch.get("name").and_then(Value::as_str).filter(|n| !n.trim().is_empty()) {
         slot.name = name.to_string();
     }
     if let Some(policy) = patch.get("policy") {
-        slot.policy = serde_json::from_value(policy.clone()).map_err(|_| ApiError::bad_request("policy must be confirm_all, auto_edit or autopilot"))?;
+        slot.policy = serde_json::from_value(policy.clone())
+            .map_err(|_| ApiError::bad_request("policy must be confirm_all, auto_edit or autopilot"))?;
     }
     let project = slot.clone();
     st.save_projects(&file)?;

@@ -1,6 +1,8 @@
 import { signal } from "@preact/signals";
 import type { AgentConfig } from "./api/generated/AgentConfig";
+import type { Budgets } from "./api/generated/Budgets";
 import type { Event } from "./api/generated/Event";
+import type { ProjectConfig } from "./api/generated/ProjectConfig";
 import type { ProviderView } from "./api/generated/ProviderView";
 import type { RunView } from "./api/generated/RunView";
 import { api, ApiError } from "./api";
@@ -11,6 +13,11 @@ export const screen = signal<Screen>("loading");
 export const view = signal<"chat" | "settings">("chat");
 export const providers = signal<ProviderView[]>([]);
 export const agents = signal<AgentConfig[]>([]);
+export const projects = signal<ProjectConfig[]>([]);
+/** Names of the tools an agent can be given, as the daemon reports them. */
+export const toolNames = signal<string[]>([]);
+/** `none` means no sandbox is active, so every edit asks whatever a project's policy says. */
+export const sandboxLevel = signal("none");
 export const runs = signal<RunView[]>([]);
 export const selectedRun = signal<string | null>(null);
 export const timeline = signal<Timeline>(emptyTimeline());
@@ -46,7 +53,8 @@ export async function enter() {
 }
 
 export async function refresh() {
-  [providers.value, agents.value, runs.value] = await Promise.all([api.providers(), api.agents(), api.runs()]);
+  const [p, a, r, pr, sys] = await Promise.all([api.providers(), api.agents(), api.runs(), api.projects(), api.system()]);
+  [providers.value, agents.value, runs.value, projects.value, toolNames.value, sandboxLevel.value] = [p, a, r, pr, sys.tools, sys.sandbox_level];
 }
 
 let source: EventSource | null = null;
@@ -57,20 +65,34 @@ export function openRun(id: string) {
   selectedRun.value = id;
   timeline.value = emptyTimeline();
   history.replaceState(null, "", `#run=${id}`);
-  connect(id);
+  connect(id, 1000);
 }
 
-function connect(id: string) {
+/** Fetch one run again and put it in the list, so its status, usage and changes are current. */
+export async function reloadRun(id: string) {
+  const run = await api.run(id);
+  runs.value = runs.value.some((r) => r.id === id) ? runs.value.map((r) => (r.id === id ? run : r)) : [run, ...runs.value];
+}
+
+/** Read any events logged since the last one seen, for example a rollback made after the run ended. */
+export function catchUp(id: string) {
+  if (selectedRun.value !== id) return;
+  source?.close();
+  connect(id, 1000);
+}
+
+function connect(id: string, retryMs: number) {
   const es = new EventSource(api.eventsUrl(id, timeline.value.lastSeq));
   source = es;
+  let wait = retryMs;
   es.onmessage = (m) => {
     if (selectedRun.value !== id) return;
     const ev = JSON.parse(m.data) as Event;
+    const before = timeline.value.status;
     timeline.value = applyEvent(timeline.value, ev);
-    if (ev.type === "run_finished") {
-      es.close();
-      api.runs().then((r) => (runs.value = r)).catch(report);
-    }
+    wait = 1000;
+    // The run list shows each run's status, so refresh this run when its status changes.
+    if (timeline.value.status !== before) reloadRun(id).catch(report);
   };
   es.addEventListener("delta", (m) => {
     if (selectedRun.value !== id) return;
@@ -78,10 +100,11 @@ function connect(id: string) {
     timeline.value = applyDelta(timeline.value, d.agent_id, d.text);
   });
   es.onerror = () => {
-    // The server closes the stream when the run is over. Otherwise reattach from the last event seen.
+    // The server ends the stream once the run is over and its log is sent. Otherwise reattach from the last
+    // event seen, waiting longer each time while nothing arrives.
     es.close();
     if (selectedRun.value !== id || isTerminal(timeline.value.status)) return;
-    setTimeout(() => selectedRun.value === id && connect(id), 1000);
+    setTimeout(() => selectedRun.value === id && source === es && connect(id, Math.min(wait * 2, 15000)), wait);
   };
 }
 
@@ -92,8 +115,8 @@ export function closeRun() {
   history.replaceState(null, "", "#");
 }
 
-export async function startRun(agentId: string, prompt: string) {
-  const run = await api.createRun({ agent_id: agentId, prompt });
+export async function startRun(agentId: string, prompt: string, projectId: string | null, budgets: Budgets | null) {
+  const run = await api.createRun({ agent_id: agentId, prompt, project_id: projectId, budgets });
   runs.value = [run, ...runs.value];
   openRun(run.id);
 }

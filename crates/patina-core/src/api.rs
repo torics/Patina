@@ -226,6 +226,8 @@ pub struct SystemInfo {
     pub version: String,
     pub git_version: Option<String>,
     pub sandbox_level: String,
+    /// Names of the tools an agent can be given.
+    pub tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

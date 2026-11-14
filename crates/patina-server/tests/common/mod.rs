@@ -160,4 +160,3 @@ pub fn text_of(events: &[Value]) -> String {
         .map(|e| e["payload"]["text"].as_str().unwrap())
         .collect()
 }
-

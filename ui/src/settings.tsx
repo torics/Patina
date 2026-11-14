@@ -1,10 +1,13 @@
 import { useEffect, useState } from "preact/hooks";
+import type { AgentConfig } from "./api/generated/AgentConfig";
+import type { PolicyMode } from "./api/generated/PolicyMode";
 import type { PresetView } from "./api/generated/PresetView";
+import type { ProjectConfig } from "./api/generated/ProjectConfig";
 import type { ProviderKind } from "./api/generated/ProviderKind";
 import type { ProviderTestResult } from "./api/generated/ProviderTestResult";
 import type { ProviderView } from "./api/generated/ProviderView";
-import { api } from "./api";
-import { agents, providers, refresh, report, view } from "./state";
+import { api, ApiError } from "./api";
+import { agents, projects, providers, refresh, report, sandboxLevel, toolNames, view } from "./state";
 
 const KINDS: ProviderKind[] = ["openai_compatible", "openai", "anthropic", "gemini", "ollama"];
 
@@ -162,12 +165,14 @@ function ProviderRow({ p }: { p: ProviderView }) {
   );
 }
 
-function AgentForm({ onDone }: { onDone: () => void }) {
-  const [name, setName] = useState("Assistant");
-  const [provider, setProvider] = useState(providers.value[0]?.id ?? "");
-  const [model, setModel] = useState("");
+function AgentForm({ existing, onDone }: { existing?: AgentConfig; onDone: () => void }) {
+  const [name, setName] = useState(existing?.name ?? "Assistant");
+  const [provider, setProvider] = useState(existing?.provider ?? providers.value[0]?.id ?? "");
+  const [model, setModel] = useState(existing?.model ?? "");
   const [models, setModels] = useState<string[]>([]);
-  const [system, setSystem] = useState("");
+  const [system, setSystem] = useState(existing?.system_prompt ?? "");
+  // A new agent starts with every tool; tools only do anything in a run that has a project.
+  const [tools, setTools] = useState<string[]>(existing?.tools ?? toolNames.value);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     setModels([]);
@@ -177,7 +182,9 @@ function AgentForm({ onDone }: { onDone: () => void }) {
     e.preventDefault();
     setError(null);
     try {
-      await api.createAgent({ id: slug(name), name, provider, model: model.trim(), system_prompt: system });
+      const fields = { name, provider, model: model.trim(), system_prompt: system, tools: toolNames.value.filter((t) => tools.includes(t)) };
+      if (existing) await api.updateAgent({ ...existing, ...fields });
+      else await api.createAgent({ id: slug(name), ...fields });
       await refresh();
       onDone();
     } catch (err) {
@@ -186,7 +193,7 @@ function AgentForm({ onDone }: { onDone: () => void }) {
   }
   return (
     <form class="card" onSubmit={save}>
-      <h3>Add an agent</h3>
+      <h3>{existing ? `Edit ${existing.name}` : "Add an agent"}</h3>
       <label>
         Name
         <input name="name" value={name} onInput={(e) => setName(e.currentTarget.value)} required />
@@ -212,6 +219,15 @@ function AgentForm({ onDone }: { onDone: () => void }) {
         System prompt (optional)
         <textarea name="system" rows={3} value={system} onInput={(e) => setSystem(e.currentTarget.value)} />
       </label>
+      <fieldset>
+        <legend>Tools the agent may use in a project</legend>
+        {toolNames.value.map((t) => (
+          <label class="check">
+            <input type="checkbox" checked={tools.includes(t)} onChange={(e) => setTools(e.currentTarget.checked ? [...tools, t] : tools.filter((x) => x !== t))} />
+            {t}
+          </label>
+        ))}
+      </fieldset>
       {error && <p class="error">{error}</p>}
       <div class="row">
         <button type="submit">Save</button>
@@ -223,9 +239,135 @@ function AgentForm({ onDone }: { onDone: () => void }) {
   );
 }
 
+function AgentRow({ a }: { a: AgentConfig }) {
+  const [editing, setEditing] = useState(false);
+  if (editing) return <AgentForm existing={a} onDone={() => setEditing(false)} />;
+  return (
+    <li class="card row">
+      <strong>{a.name}</strong>
+      <span class="muted">
+        {a.provider} · {a.model} · {a.tools.length ? `tools: ${a.tools.join(", ")}` : "no tools"}
+      </span>
+      <button class="link" onClick={() => setEditing(true)} aria-label={`Edit ${a.name}`}>
+        Edit
+      </button>
+      <button
+        class="link danger"
+        aria-label={`Delete ${a.name}`}
+        onClick={() =>
+          api
+            .deleteAgent(a.id)
+            .then(refresh)
+            .catch(report)
+        }
+      >
+        Delete
+      </button>
+    </li>
+  );
+}
+
+const POLICIES: { value: PolicyMode; label: string }[] = [
+  { value: "confirm_all", label: "Ask before every edit" },
+  { value: "auto_edit", label: "Apply edits without asking" },
+  { value: "autopilot", label: "Never ask" },
+];
+
+function ProjectForm({ onDone }: { onDone: () => void }) {
+  const [path, setPath] = useState("");
+  const [name, setName] = useState("");
+  const [policy, setPolicy] = useState<PolicyMode>("confirm_all");
+  const [offerInit, setOfferInit] = useState(false);
+  const [initGit, setInitGit] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  async function save(e: Event) {
+    e.preventDefault();
+    setError(null);
+    try {
+      await api.createProject({ id: null, name: name.trim() || null, path: path.trim(), policy, init_git: initGit });
+      await refresh();
+      onDone();
+    } catch (err) {
+      // A folder that is not a repository yet can become one, but only if the owner says so.
+      if (err instanceof ApiError && err.code === "not_a_repository") setOfferInit(true);
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+  return (
+    <form class="card" onSubmit={save}>
+      <h3>Add a project</h3>
+      <label>
+        Folder (an absolute path on the machine that runs Patina)
+        <input name="path" value={path} onInput={(e) => setPath(e.currentTarget.value)} placeholder="/home/you/code/my-project" required />
+      </label>
+      <label>
+        Name (optional)
+        <input name="project_name" value={name} onInput={(e) => setName(e.currentTarget.value)} />
+      </label>
+      <label>
+        Approvals
+        <select name="policy" value={policy} onChange={(e) => setPolicy(e.currentTarget.value as PolicyMode)}>
+          {POLICIES.map((p) => (
+            <option value={p.value}>{p.label}</option>
+          ))}
+        </select>
+      </label>
+      {offerInit && (
+        <label class="check">
+          <input type="checkbox" checked={initGit} onChange={(e) => setInitGit(e.currentTarget.checked)} />
+          Create a git repository in that folder
+        </label>
+      )}
+      {error && <p class="error">{error}</p>}
+      <div class="row">
+        <button type="submit">Save</button>
+        <button type="button" class="link" onClick={onDone}>
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
+function ProjectRow({ p }: { p: ProjectConfig }) {
+  return (
+    <li class="card row">
+      <strong>{p.name}</strong>
+      <span class="muted">{p.path}</span>
+      <select
+        aria-label={`Approvals for ${p.name}`}
+        value={p.policy}
+        onChange={(e) =>
+          api
+            .updateProject(p.id, { policy: e.currentTarget.value as PolicyMode })
+            .then(refresh)
+            .catch(report)
+        }
+      >
+        {POLICIES.map((o) => (
+          <option value={o.value}>{o.label}</option>
+        ))}
+      </select>
+      <button
+        class="link danger"
+        aria-label={`Remove ${p.name}`}
+        onClick={() =>
+          api
+            .deleteProject(p.id)
+            .then(refresh)
+            .catch(report)
+        }
+      >
+        Remove
+      </button>
+    </li>
+  );
+}
+
 export function Settings() {
   const [addingProvider, setAddingProvider] = useState(false);
   const [addingAgent, setAddingAgent] = useState(false);
+  const [addingProject, setAddingProject] = useState(false);
   const noProviders = providers.value.length === 0;
   const noAgents = agents.value.length === 0;
   return (
@@ -251,23 +393,7 @@ export function Settings() {
           <h2>Agents</h2>
           <ul class="list">
             {agents.value.map((a) => (
-              <li class="card row" key={a.id}>
-                <strong>{a.name}</strong>
-                <span class="muted">
-                  {a.provider} · {a.model}
-                </span>
-                <button
-                  class="link danger"
-                  onClick={() =>
-                    api
-                      .deleteAgent(a.id)
-                      .then(refresh)
-                      .catch(report)
-                  }
-                >
-                  Delete
-                </button>
-              </li>
+              <AgentRow key={a.id} a={a} />
             ))}
           </ul>
           {addingAgent || noAgents ? (
@@ -280,6 +406,21 @@ export function Settings() {
           ) : (
             <button onClick={() => setAddingAgent(true)}>Add agent</button>
           )}
+        </section>
+      )}
+      {!noAgents && (
+        <section>
+          <h2>Projects</h2>
+          <p class="muted">
+            A project is a folder with a git repository. An agent works in its own copy on a separate branch, and nothing reaches your branch until you merge it.
+            {sandboxLevel.value === "none" && " This version has no sandbox yet, so every edit asks for approval whatever is chosen here."}
+          </p>
+          <ul class="list">
+            {projects.value.map((p) => (
+              <ProjectRow key={p.id} p={p} />
+            ))}
+          </ul>
+          {addingProject ? <ProjectForm onDone={() => setAddingProject(false)} /> : <button onClick={() => setAddingProject(true)}>Add project</button>}
         </section>
       )}
     </div>

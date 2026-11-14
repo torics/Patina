@@ -13,8 +13,21 @@ const ALL_TOOLS: [&str; 5] = ["list_files", "read_file", "search", "edit_file", 
 async fn workbench(scripts: Vec<Script>, tools: &[&str]) -> (Daemon, PathBuf) {
     let mut d = start(scripts, false).await;
     d.sign_in().await;
-    assert_eq!(d.post("/providers", json!({"id": "p1", "kind": "openai_compatible", "base_url": "http://127.0.0.1:9/v1"})).await.0, 200);
-    let (s, b) = d.post("/agents", json!({"id": "a1", "name": "Builder", "provider": "p1", "model": "m1", "tools": tools})).await;
+    assert_eq!(
+        d.post(
+            "/providers",
+            json!({"id": "p1", "kind": "openai_compatible", "base_url": "http://127.0.0.1:9/v1"})
+        )
+        .await
+        .0,
+        200
+    );
+    let (s, b) = d
+        .post(
+            "/agents",
+            json!({"id": "a1", "name": "Builder", "provider": "p1", "model": "m1", "tools": tools}),
+        )
+        .await;
     assert_eq!(s, 200, "{b}");
     let repo = d.dir.path().join("site");
     std::fs::create_dir_all(&repo).unwrap();
@@ -22,7 +35,9 @@ async fn workbench(scripts: Vec<Script>, tools: &[&str]) -> (Daemon, PathBuf) {
     std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
     std::fs::write(repo.join("AGENTS.md"), "Always write Spanish.\n").unwrap();
     git::checkpoint(&repo, "first").await.unwrap().unwrap();
-    let (s, b) = d.post("/projects", json!({"path": repo.to_str().unwrap(), "policy": "confirm_all"})).await;
+    let (s, b) = d
+        .post("/projects", json!({"path": repo.to_str().unwrap(), "policy": "confirm_all"}))
+        .await;
     assert_eq!((s, b["id"].as_str()), (200, Some("site")), "{b}");
     (d, repo)
 }
@@ -54,7 +69,9 @@ async fn next_approval(d: &Daemon, run: &str) -> Value {
 }
 
 async fn answer(d: &Daemon, run: &str, approval: &Value, body: Value) -> u16 {
-    d.post(&format!("/runs/{run}/approvals/{}", approval["id"].as_str().unwrap()), body).await.0
+    d.post(&format!("/runs/{run}/approvals/{}", approval["id"].as_str().unwrap()), body)
+        .await
+        .0
 }
 
 fn worktree(d: &Daemon, run: &str) -> PathBuf {
@@ -69,7 +86,11 @@ fn kinds(events: &[Value]) -> Vec<&str> {
 async fn an_agent_edits_a_repository_in_a_worktree_and_the_owner_approves_diffs_and_merges() {
     let scripts = vec![
         Script::tool_calls(&[("c1", "read_file", json!({"path": "a.txt"}))]),
-        Script::tool_calls(&[("c2", "edit_file", json!({"path": "a.txt", "old_string": "one", "new_string": "uno"}))]),
+        Script::tool_calls(&[(
+            "c2",
+            "edit_file",
+            json!({"path": "a.txt", "old_string": "one", "new_string": "uno"}),
+        )]),
         Script::tool_calls(&[("c3", "write_file", json!({"path": "docs/notas.md", "content": "# Notas\n"}))]),
         Script::text("Listo."),
     ];
@@ -82,9 +103,17 @@ async fn an_agent_edits_a_repository_in_a_worktree_and_the_owner_approves_diffs_
     let diff = a["diff"].as_str().unwrap();
     assert!(diff.contains("-one") && diff.contains("+uno"), "{diff}");
     assert_eq!(get_json(&d, &format!("/runs/{run}")).await["status"], "waiting_approval");
-    assert_eq!(std::fs::read_to_string(worktree(&d, &run).join("a.txt")).unwrap(), "one\ntwo\n", "nothing is written before approval");
+    assert_eq!(
+        std::fs::read_to_string(worktree(&d, &run).join("a.txt")).unwrap(),
+        "one\ntwo\n",
+        "nothing is written before approval"
+    );
     assert_eq!(answer(&d, &run, &a, json!({"action": "approve"})).await, 200);
-    assert_eq!(answer(&d, &run, &a, json!({"action": "deny"})).await, 409, "an approval is answered once");
+    assert_eq!(
+        answer(&d, &run, &a, json!({"action": "deny"})).await,
+        409,
+        "an approval is answered once"
+    );
 
     let b = next_approval(&d, &run).await;
     assert_eq!(b["tool"], "write_file");
@@ -106,9 +135,20 @@ async fn an_agent_edits_a_repository_in_a_worktree_and_the_owner_approves_diffs_
     assert_eq!(ids, (1..=ids.len() as i64).collect::<Vec<_>>());
     let k = kinds(&events);
     let expect = [
-        "tool_call", "tool_result", // read
-        "usage", "tool_call", "approval_requested", "approval_resolved", "tool_result", "checkpoint", // edit
-        "usage", "tool_call", "approval_requested", "approval_resolved", "tool_result", "checkpoint", // write
+        "tool_call",
+        "tool_result", // read
+        "usage",
+        "tool_call",
+        "approval_requested",
+        "approval_resolved",
+        "tool_result",
+        "checkpoint", // edit
+        "usage",
+        "tool_call",
+        "approval_requested",
+        "approval_resolved",
+        "tool_result",
+        "checkpoint", // write
     ];
     let from = k.iter().position(|x| *x == "tool_call").unwrap();
     assert_eq!(&k[from..from + expect.len()], &expect, "{k:?}");
@@ -118,10 +158,20 @@ async fn an_agent_edits_a_repository_in_a_worktree_and_the_owner_approves_diffs_
 
     // Diff against the base commit, and one checkpoint per step that changed files.
     let diff = get_json(&d, &format!("/runs/{run}/diff")).await;
-    assert_eq!(diff["files"], json!([{"status": "M", "path": "a.txt"}, {"status": "A", "path": "docs/notas.md"}]));
+    assert_eq!(
+        diff["files"],
+        json!([{"status": "M", "path": "a.txt"}, {"status": "A", "path": "docs/notas.md"}])
+    );
     assert!(diff["diff"].as_str().unwrap().contains("+uno"));
     let cps = get_json(&d, &format!("/runs/{run}/checkpoints")).await;
-    assert_eq!(cps.as_array().unwrap().iter().map(|c| c["step"].as_u64().unwrap()).collect::<Vec<_>>(), [2, 3]);
+    assert_eq!(
+        cps.as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["step"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        [2, 3]
+    );
     let patch = d.get(&format!("/runs/{run}/diff?format=patch")).await.1;
     assert!(patch.starts_with("diff --git"), "{patch}");
 
@@ -133,14 +183,24 @@ async fn an_agent_edits_a_repository_in_a_worktree_and_the_owner_approves_diffs_
     assert!(!worktree(&d, &run).exists());
     assert_eq!(git::list_worktrees(&repo).await.unwrap().len(), 1);
     let view = get_json(&d, &format!("/runs/{run}")).await;
-    assert_eq!((view["disposition"].as_str(), view["has_worktree"].as_bool(), view["branch"].clone()), (Some("merged"), Some(false), Value::Null));
-    assert_eq!(d.post(&format!("/runs/{run}/merge"), json!({})).await.0, 409, "nothing left to merge");
+    assert_eq!(
+        (view["disposition"].as_str(), view["has_worktree"].as_bool(), view["branch"].clone()),
+        (Some("merged"), Some(false), Value::Null)
+    );
+    assert_eq!(
+        d.post(&format!("/runs/{run}/merge"), json!({})).await.0,
+        409,
+        "nothing left to merge"
+    );
     assert_eq!(d.get(&format!("/runs/{run}/diff")).await.0, 409);
 }
 
 #[tokio::test]
 async fn the_agent_gets_project_instructions_and_only_its_own_tools() {
-    let scripts = vec![Script::tool_calls(&[("c1", "write_file", json!({"path": "x.txt", "content": "x"}))]), Script::text("ok")];
+    let scripts = vec![
+        Script::tool_calls(&[("c1", "write_file", json!({"path": "x.txt", "content": "x"}))]),
+        Script::text("ok"),
+    ];
     let (d, _repo) = workbench(scripts, &["read_file", "list_files"]).await;
     let run = start_run(&d, json!({})).await;
     d.wait_status(&run, "completed").await;
@@ -161,10 +221,26 @@ async fn a_denial_returns_the_note_and_edited_arguments_are_what_runs() {
     let (d, _repo) = workbench(scripts, &ALL_TOOLS).await;
     let run = start_run(&d, json!({})).await;
     let a = next_approval(&d, &run).await;
-    assert_eq!(answer(&d, &run, &a, json!({"action": "deny", "note": "put it under docs"})).await, 200);
+    assert_eq!(
+        answer(&d, &run, &a, json!({"action": "deny", "note": "put it under docs"})).await,
+        200
+    );
     let b = next_approval(&d, &run).await;
-    assert_eq!(answer(&d, &run, &b, json!({"action": "edit"})).await, 400, "an edit needs arguments");
-    assert_eq!(answer(&d, &run, &b, json!({"action": "edit", "args": {"path": "docs/right.txt", "content": "hola"}})).await, 200);
+    assert_eq!(
+        answer(&d, &run, &b, json!({"action": "edit"})).await,
+        400,
+        "an edit needs arguments"
+    );
+    assert_eq!(
+        answer(
+            &d,
+            &run,
+            &b,
+            json!({"action": "edit", "args": {"path": "docs/right.txt", "content": "hola"}})
+        )
+        .await,
+        200
+    );
     d.wait_status(&run, "completed").await;
 
     let wt = worktree(&d, &run);
@@ -174,11 +250,27 @@ async fn a_denial_returns_the_note_and_edited_arguments_are_what_runs() {
     let results: Vec<&Value> = events.iter().filter(|e| e["type"] == "tool_result").collect();
     assert_eq!(results[0]["payload"]["is_error"], true);
     assert!(results[0]["payload"]["content"].as_str().unwrap().contains("put it under docs"));
-    assert!(results[1]["payload"]["content"].as_str().unwrap().contains("created docs/right.txt"));
-    let resolved: Vec<&str> = events.iter().filter(|e| e["type"] == "approval_resolved").map(|e| e["payload"]["action"].as_str().unwrap()).collect();
+    assert!(
+        results[1]["payload"]["content"]
+            .as_str()
+            .unwrap()
+            .contains("created docs/right.txt")
+    );
+    let resolved: Vec<&str> = events
+        .iter()
+        .filter(|e| e["type"] == "approval_resolved")
+        .map(|e| e["payload"]["action"].as_str().unwrap())
+        .collect();
     assert_eq!(resolved, ["deny", "edit"]);
     let all = get_json(&d, "/approvals").await;
-    assert_eq!(all.as_array().unwrap().iter().map(|a| a["status"].as_str().unwrap()).collect::<Vec<_>>(), ["denied", "approved"]);
+    assert_eq!(
+        all.as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["status"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["denied", "approved"]
+    );
 }
 
 #[tokio::test]
@@ -246,7 +338,10 @@ async fn keeping_the_branch_removes_only_the_worktree_and_merge_needs_a_clean_ch
     answer(&d, &run, &a, json!({"action": "approve"})).await;
     d.wait_status(&run, "completed").await;
     let (s, view) = d.post(&format!("/runs/{run}/discard"), json!({"keep_branch": true})).await;
-    assert_eq!((s, view["disposition"].as_str(), view["has_worktree"].as_bool()), (200, Some("kept"), Some(false)));
+    assert_eq!(
+        (s, view["disposition"].as_str(), view["has_worktree"].as_bool()),
+        (200, Some("kept"), Some(false))
+    );
     assert!(!worktree(&d, &run).exists());
     // The diff is still available from the kept branch.
     let diff = get_json(&d, &format!("/runs/{run}/diff")).await;
@@ -264,7 +359,10 @@ async fn keeping_the_branch_removes_only_the_worktree_and_merge_needs_a_clean_ch
     let (s, body) = d.post(&format!("/runs/{run2}/merge"), json!({})).await;
     assert_eq!(s, 409, "{body}");
     assert!(body["error"]["message"].as_str().unwrap().contains("uncommitted"));
-    assert!(!repo.join("b.txt").exists() && worktree(&d, &run2).exists(), "a refused merge changes nothing");
+    assert!(
+        !repo.join("b.txt").exists() && worktree(&d, &run2).exists(),
+        "a refused merge changes nothing"
+    );
     std::fs::remove_file(repo.join("wip.txt")).unwrap();
     assert_eq!(d.post(&format!("/runs/{run2}/merge"), json!({})).await.0, 200);
     assert!(repo.join("b.txt").exists());
@@ -272,28 +370,61 @@ async fn keeping_the_branch_removes_only_the_worktree_and_merge_needs_a_clean_ch
 
 #[tokio::test]
 async fn a_budget_stops_a_run_and_can_be_raised() {
-    let looping: Vec<Script> = (0..10).map(|i| Script::tool_calls(&[(&format!("c{i}"), "list_files", json!({"path": "."}))])).collect();
+    let looping: Vec<Script> = (0..10)
+        .map(|i| Script::tool_calls(&[(&format!("c{i}"), "list_files", json!({"path": "."}))]))
+        .collect();
     let (d, _repo) = workbench(looping, &ALL_TOOLS).await;
     let run = start_run(&d, json!({"budgets": {"max_steps": 3}})).await;
     d.wait_status(&run, "budget_exceeded").await;
     let view = get_json(&d, &format!("/runs/{run}")).await;
-    assert_eq!((view["usage"]["steps"].as_u64(), view["budgets"]["max_steps"].as_u64(), view["usage"]["input_tokens"].as_u64()), (Some(3), Some(3), Some(30)));
+    assert_eq!(
+        (
+            view["usage"]["steps"].as_u64(),
+            view["budgets"]["max_steps"].as_u64(),
+            view["usage"]["input_tokens"].as_u64()
+        ),
+        (Some(3), Some(3), Some(30))
+    );
     let (_, events, _) = d.events(&run, "", None).await;
     let last = events.last().unwrap();
     assert_eq!(last["payload"]["status"], "budget_exceeded");
     assert!(last["payload"]["error"].as_str().unwrap().contains("step limit"));
     assert_eq!(events.iter().filter(|e| e["type"] == "tool_call").count(), 3);
 
-    let (s, view) = d.send(reqwest::Method::PATCH, &format!("/runs/{run}/budgets"), json!({"max_steps": 20})).await;
-    assert_eq!((s, view["budgets"]["max_steps"].as_u64(), view["budgets"]["max_tokens"].as_u64()), (200, Some(20), Some(2_000_000)));
-    assert_eq!(d.send(reqwest::Method::PATCH, &format!("/runs/{run}/budgets"), json!({"max_steps": 0})).await.0, 400);
-    assert_eq!(d.send(reqwest::Method::PATCH, &format!("/runs/{run}/budgets"), json!({"bogus": 1})).await.0, 400);
-    assert_eq!(d.post("/runs", json!({"agent_id": "a1", "prompt": "x", "budgets": {"max_tokens": 0}})).await.0, 400);
+    let (s, view) = d
+        .send(reqwest::Method::PATCH, &format!("/runs/{run}/budgets"), json!({"max_steps": 20}))
+        .await;
+    assert_eq!(
+        (s, view["budgets"]["max_steps"].as_u64(), view["budgets"]["max_tokens"].as_u64()),
+        (200, Some(20), Some(2_000_000))
+    );
+    assert_eq!(
+        d.send(reqwest::Method::PATCH, &format!("/runs/{run}/budgets"), json!({"max_steps": 0}))
+            .await
+            .0,
+        400
+    );
+    assert_eq!(
+        d.send(reqwest::Method::PATCH, &format!("/runs/{run}/budgets"), json!({"bogus": 1}))
+            .await
+            .0,
+        400
+    );
+    assert_eq!(
+        d.post("/runs", json!({"agent_id": "a1", "prompt": "x", "budgets": {"max_tokens": 0}}))
+            .await
+            .0,
+        400
+    );
 }
 
 #[tokio::test]
 async fn cancelling_a_run_that_waits_for_approval_expires_the_request() {
-    let scripts = vec![Script::tool_calls(&[("c1", "write_file", json!({"path": "x.txt", "content": "x"}))])];
+    let scripts = vec![Script::tool_calls(&[(
+        "c1",
+        "write_file",
+        json!({"path": "x.txt", "content": "x"}),
+    )])];
     let (d, _repo) = workbench(scripts, &ALL_TOOLS).await;
     let run = start_run(&d, json!({})).await;
     let a = next_approval(&d, &run).await;
@@ -339,24 +470,56 @@ async fn projects_must_be_git_repositories_outside_patinas_own_folders() {
     std::fs::create_dir_all(&plain).unwrap();
     let (s, b) = d.post("/projects", json!({"path": plain.to_str().unwrap()})).await;
     assert_eq!((s, b["error"]["code"].as_str()), (409, Some("not_a_repository")));
-    let (s, b) = d.post("/projects", json!({"path": plain.to_str().unwrap(), "init_git": true, "name": "Plain Folder"})).await;
-    assert_eq!((s, b["id"].as_str(), b["policy"].as_str()), (200, Some("plain-folder"), Some("auto_edit")), "{b}");
+    let (s, b) = d
+        .post(
+            "/projects",
+            json!({"path": plain.to_str().unwrap(), "init_git": true, "name": "Plain Folder"}),
+        )
+        .await;
+    assert_eq!(
+        (s, b["id"].as_str(), b["policy"].as_str()),
+        (200, Some("plain-folder"), Some("auto_edit")),
+        "{b}"
+    );
     assert!(git::is_repo_root(&plain).await && git::head(&plain).await.is_ok());
 
     assert_eq!(d.post("/projects", json!({"path": "relative/path"})).await.0, 400);
     assert_eq!(d.post("/projects", json!({"path": "/does/not/exist"})).await.0, 400);
-    assert_eq!(d.post("/projects", json!({"path": repo.to_str().unwrap()})).await.0, 409, "already registered");
+    assert_eq!(
+        d.post("/projects", json!({"path": repo.to_str().unwrap()})).await.0,
+        409,
+        "already registered"
+    );
     for own in ["data", "config", ""] {
         let p = d.dir.path().join(own);
-        let (s, b) = d.post("/projects", json!({"path": p.to_str().unwrap(), "init_git": true, "id": "own"})).await;
+        let (s, b) = d
+            .post("/projects", json!({"path": p.to_str().unwrap(), "init_git": true, "id": "own"}))
+            .await;
         assert_eq!(s, 400, "{own:?}: {b}");
     }
-    let (s, b) = d.send(reqwest::Method::PATCH, "/projects/site", json!({"policy": "autopilot", "name": "My Site"})).await;
-    assert_eq!((s, b["policy"].as_str(), b["name"].as_str()), (200, Some("autopilot"), Some("My Site")));
-    assert_eq!(d.send(reqwest::Method::PATCH, "/projects/site", json!({"policy": "yolo"})).await.0, 400);
+    let (s, b) = d
+        .send(
+            reqwest::Method::PATCH,
+            "/projects/site",
+            json!({"policy": "autopilot", "name": "My Site"}),
+        )
+        .await;
+    assert_eq!(
+        (s, b["policy"].as_str(), b["name"].as_str()),
+        (200, Some("autopilot"), Some("My Site"))
+    );
+    assert_eq!(
+        d.send(reqwest::Method::PATCH, "/projects/site", json!({"policy": "yolo"})).await.0,
+        400
+    );
     let toml = std::fs::read_to_string(d.dir.path().join("config/projects.toml")).unwrap();
     assert!(toml.contains("policy = \"autopilot\""), "{toml}");
     assert_eq!(d.send(reqwest::Method::DELETE, "/projects/site", json!({})).await.0, 200);
     assert!(repo.join("a.txt").exists(), "unregistering leaves the folder alone");
-    assert_eq!(d.post("/runs", json!({"agent_id": "a1", "prompt": "x", "project_id": "site"})).await.0, 400);
+    assert_eq!(
+        d.post("/runs", json!({"agent_id": "a1", "prompt": "x", "project_id": "site"}))
+            .await
+            .0,
+        400
+    );
 }

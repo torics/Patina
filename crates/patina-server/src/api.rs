@@ -220,6 +220,12 @@ fn check_agent(st: &AppState, a: &AgentConfig) -> ApiResult<()> {
     if st.providers()?.get(&a.provider).is_none() {
         return Err(ApiError::bad_request(format!("provider {:?} does not exist", a.provider)));
     }
+    if let Some(unknown) = a.tools.iter().find(|t| !patina_tools::files::TOOL_NAMES.contains(&t.as_str())) {
+        return Err(ApiError::bad_request(format!(
+            "unknown tool {unknown:?}; the tools are {}",
+            patina_tools::files::TOOL_NAMES.join(", ")
+        )));
+    }
     Ok(())
 }
 
@@ -267,5 +273,6 @@ pub async fn system(State(_st): St) -> Json<SystemInfo> {
         version: env!("CARGO_PKG_VERSION").into(),
         git_version,
         sandbox_level: "none".into(),
+        tools: patina_tools::files::TOOL_NAMES.iter().map(|t| t.to_string()).collect(),
     })
 }

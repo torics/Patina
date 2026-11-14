@@ -1,5 +1,13 @@
 // The only place that talks to the daemon. The CSRF token lives in memory, never in storage.
 import type { AgentConfig } from "./api/generated/AgentConfig";
+import type { ApprovalAnswer } from "./api/generated/ApprovalAnswer";
+import type { Budgets } from "./api/generated/Budgets";
+import type { CheckpointView } from "./api/generated/CheckpointView";
+import type { DiffView } from "./api/generated/DiffView";
+import type { MergeResult } from "./api/generated/MergeResult";
+import type { NewProject } from "./api/generated/NewProject";
+import type { PolicyMode } from "./api/generated/PolicyMode";
+import type { ProjectConfig } from "./api/generated/ProjectConfig";
 import type { NewRun } from "./api/generated/NewRun";
 import type { PresetView } from "./api/generated/PresetView";
 import type { ProviderInput } from "./api/generated/ProviderInput";
@@ -66,5 +74,19 @@ export const api = {
   runs: () => call<RunView[]>("GET", "/runs"),
   createRun: (r: NewRun) => call<RunView>("POST", "/runs", r),
   cancelRun: (id: string) => call("POST", `/runs/${encodeURIComponent(id)}/cancel`, {}),
+  run: (id: string) => call<RunView>("GET", `/runs/${encodeURIComponent(id)}`),
+  setBudgets: (id: string, patch: Partial<Budgets>) => call<RunView>("PATCH", `/runs/${encodeURIComponent(id)}/budgets`, patch),
+  answerApproval: (runId: string, approvalId: string, answer: ApprovalAnswer) =>
+    call("POST", `/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(approvalId)}`, answer),
+  diff: (id: string) => call<DiffView>("GET", `/runs/${encodeURIComponent(id)}/diff`),
+  patchUrl: (id: string) => `${BASE}/runs/${encodeURIComponent(id)}/diff?format=patch`,
+  checkpoints: (id: string) => call<CheckpointView[]>("GET", `/runs/${encodeURIComponent(id)}/checkpoints`),
+  rollback: (id: string, step: number) => call<CheckpointView[]>("POST", `/runs/${encodeURIComponent(id)}/rollback`, { step }),
+  merge: (id: string) => call<MergeResult>("POST", `/runs/${encodeURIComponent(id)}/merge`, {}),
+  discard: (id: string, keepBranch: boolean) => call<RunView>("POST", `/runs/${encodeURIComponent(id)}/discard`, { keep_branch: keepBranch }),
+  projects: () => call<ProjectConfig[]>("GET", "/projects"),
+  createProject: (p: NewProject) => call<ProjectConfig>("POST", "/projects", p),
+  updateProject: (id: string, patch: { name?: string; policy?: PolicyMode }) => call<ProjectConfig>("PATCH", `/projects/${encodeURIComponent(id)}`, patch),
+  deleteProject: (id: string) => call("DELETE", `/projects/${encodeURIComponent(id)}`),
   eventsUrl: (id: string, after: number) => `${BASE}/runs/${encodeURIComponent(id)}/events?after=${after}`,
 };

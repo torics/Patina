@@ -47,7 +47,9 @@ pub async fn create_run(State(st): St, Json(input): Json<NewRun>) -> ApiResult<J
 }
 
 pub async fn list_runs(State(st): St) -> ApiResult<Json<Vec<RunView>>> {
-    Ok(Json(store::list_runs(&st.db, 200).await?.into_iter().map(|r| view(&st, r)).collect()))
+    Ok(Json(
+        store::list_runs(&st.db, 200).await?.into_iter().map(|r| view(&st, r)).collect(),
+    ))
 }
 
 pub async fn load(st: &AppState, id: &str) -> ApiResult<store::RunRow> {
@@ -115,10 +117,20 @@ fn approval_view(a: approvals::ApprovalRow) -> ApprovalView {
 }
 
 pub async fn list_approvals(State(st): St, Query(q): Query<ApprovalsQuery>) -> ApiResult<Json<Vec<ApprovalView>>> {
-    Ok(Json(approvals::list(&st.db, q.status.as_deref()).await?.into_iter().map(approval_view).collect()))
+    Ok(Json(
+        approvals::list(&st.db, q.status.as_deref())
+            .await?
+            .into_iter()
+            .map(approval_view)
+            .collect(),
+    ))
 }
 
-pub async fn answer_approval(State(st): St, Path((run_id, approval_id)): Path<(String, String)>, Json(answer): Json<ApprovalAnswer>) -> ApiResult<Json<Value>> {
+pub async fn answer_approval(
+    State(st): St,
+    Path((run_id, approval_id)): Path<(String, String)>,
+    Json(answer): Json<ApprovalAnswer>,
+) -> ApiResult<Json<Value>> {
     engine::answer_approval(&st, &run_id, &approval_id, answer).await?;
     Ok(Json(json!({"ok": true})))
 }
@@ -129,7 +141,9 @@ pub struct EventsQuery {
 }
 
 fn sse_event(ev: &patina_core::events::Event) -> SseEvent {
-    SseEvent::default().id(ev.seq.to_string()).data(serde_json::to_string(ev).unwrap_or_else(|_| "{}".into()))
+    SseEvent::default()
+        .id(ev.seq.to_string())
+        .data(serde_json::to_string(ev).unwrap_or_else(|_| "{}".into()))
 }
 
 /// Replay from `after` (or `Last-Event-ID`), then follow live with no gap and no duplicate.
@@ -141,13 +155,23 @@ pub async fn run_events(
     headers: HeaderMap,
 ) -> ApiResult<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>> {
     load(&st, &id).await?;
-    let after = q.after.or_else(|| headers.get("last-event-id").and_then(|v| v.to_str().ok()).and_then(|v| v.parse().ok())).unwrap_or(0);
+    let after = q
+        .after
+        .or_else(|| {
+            headers
+                .get("last-event-id")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse().ok())
+        })
+        .unwrap_or(0);
     // Subscribe before reading the log: anything appended meanwhile arrives on the channel and is de-duplicated by seq.
     let rx = st.runs.lock().unwrap().get(&id).map(|h| h.tx.subscribe());
     let stream = follow(st.db.clone(), id, after, rx).map(|item| {
         Ok(match item {
             Live::Event(ev) => sse_event(&ev),
-            Live::Delta { agent_id, text, .. } => SseEvent::default().event("delta").data(json!({"agent_id": agent_id, "text": text}).to_string()),
+            Live::Delta { agent_id, text, .. } => SseEvent::default()
+                .event("delta")
+                .data(json!({"agent_id": agent_id, "text": text}).to_string()),
         })
     });
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("hb")))
@@ -165,7 +189,14 @@ struct Follow {
 /// A run's events after `after`: first from the log, then live from `rx`, in order, with no gap and no duplicate.
 /// Ends once the log is drained and the run is no longer active (`rx` is `None` or closed).
 pub fn follow(db: Db, run_id: String, after: i64, rx: Option<broadcast::Receiver<Live>>) -> impl Stream<Item = Live> {
-    let st = Follow { db, run_id, last: after, rx, backlog: Default::default(), replayed: false };
+    let st = Follow {
+        db,
+        run_id,
+        last: after,
+        rx,
+        backlog: Default::default(),
+        replayed: false,
+    };
     futures::stream::unfold(st, |mut f| async move {
         loop {
             if let Some(ev) = f.backlog.pop_front() {

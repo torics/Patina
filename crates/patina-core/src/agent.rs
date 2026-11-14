@@ -217,7 +217,7 @@ async fn steps(spec: &AgentSpec, ctx: &RunCtx<'_>, history: &mut Vec<Message>) -
                 max_output_tokens: spec.max_output_tokens,
                 reasoning: None,
             };
-            match one_attempt(spec, ctx, req, attempt).await? {
+            match one_attempt(spec, ctx, req, step, attempt).await? {
                 Ok(t) => break t,
                 Err(ProviderError::Cancelled) => return Ok(Outcome::Cancelled),
                 Err(e) if e.is_retryable() && attempt < MAX_RETRIES => {
@@ -345,7 +345,9 @@ async fn steps(spec: &AgentSpec, ctx: &RunCtx<'_>, history: &mut Vec<Message>) -
                     )
                     .await?;
                 if out.changed_files {
-                    changed.push(call.name.clone());
+                    // The tool's own first line says what it did, for example "created NOTES.md (21 bytes)".
+                    let line: String = out.content.lines().next().unwrap_or(&call.name).chars().take(120).collect();
+                    changed.push(line);
                 }
                 ToolOutput { content, ..out }
             };
@@ -366,7 +368,7 @@ async fn steps(spec: &AgentSpec, ctx: &RunCtx<'_>, history: &mut Vec<Message>) -
         )
         .await?;
         if !changed.is_empty() {
-            ctx.host.checkpoint(&spec.id, step, &changed.join(", ")).await?;
+            ctx.host.checkpoint(&spec.id, step, &changed.join("; ")).await?;
         }
         if cancelled {
             return Ok(Outcome::Cancelled);
@@ -452,7 +454,13 @@ async fn execute(spec: &AgentSpec, ctx: &RunCtx<'_>, call: &ToolCallInfo) -> Res
 }
 
 /// One streaming attempt. The outer error is the host failing; the inner one is the provider failing.
-async fn one_attempt(spec: &AgentSpec, ctx: &RunCtx<'_>, req: ChatRequest, attempt: u32) -> Result<Result<Turn, ProviderError>, HostError> {
+async fn one_attempt(
+    spec: &AgentSpec,
+    ctx: &RunCtx<'_>,
+    req: ChatRequest,
+    step: u32,
+    attempt: u32,
+) -> Result<Result<Turn, ProviderError>, HostError> {
     let agent = Some(spec.id.as_str());
     let host = ctx.host;
     let mut stream = match ctx.provider.stream(req, ctx.cancel.clone()).await {
@@ -475,11 +483,11 @@ async fn one_attempt(spec: &AgentSpec, ctx: &RunCtx<'_>, req: ChatRequest, attem
         () => {
             if !pending_text.is_empty() {
                 let t = std::mem::take(&mut pending_text);
-                host.append(agent, EventType::Text, json!({"text": t, "attempt": attempt})).await?;
+                host.append(agent, EventType::Text, json!({"text": t, "step": step, "attempt": attempt})).await?;
             }
             if !pending_reasoning.is_empty() {
                 let t = std::mem::take(&mut pending_reasoning);
-                host.append(agent, EventType::Reasoning, json!({"text": t, "attempt": attempt})).await?;
+                host.append(agent, EventType::Reasoning, json!({"text": t, "step": step, "attempt": attempt})).await?;
             }
         };
     }

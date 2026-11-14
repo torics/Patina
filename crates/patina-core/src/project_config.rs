@@ -24,7 +24,10 @@ pub struct ProjectsFile {
 
 impl Default for ProjectsFile {
     fn default() -> Self {
-        ProjectsFile { schema_version: 1, projects: vec![] }
+        ProjectsFile {
+            schema_version: 1,
+            projects: vec![],
+        }
     }
 }
 
@@ -32,7 +35,10 @@ impl ProjectsFile {
     pub fn parse(text: &str) -> Result<ProjectsFile, String> {
         let f: ProjectsFile = toml::from_str(text).map_err(|e| format!("invalid projects.toml: {e}"))?;
         if f.schema_version > 1 {
-            return Err(format!("projects.toml schema_version {} is newer than this build supports", f.schema_version));
+            return Err(format!(
+                "projects.toml schema_version {} is newer than this build supports",
+                f.schema_version
+            ));
         }
         f.validate()?;
         Ok(f)

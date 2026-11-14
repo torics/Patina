@@ -87,10 +87,17 @@ fn convert_message(m: &Message) -> Vec<ChatMessage> {
             for p in &m.parts {
                 if let Part::Reasoning { opaque } = p {
                     let strings = |v: &serde_json::Value| -> Vec<String> {
-                        v.as_array().into_iter().flatten().filter_map(|s| s.as_str().map(str::to_string)).collect()
+                        v.as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|s| s.as_str().map(str::to_string))
+                            .collect()
                     };
                     match opaque.get("tool_call_id").and_then(|v| v.as_str()) {
-                        Some(id) => call_signatures.entry(id).or_default().extend(strings(&opaque["thought_signatures"])),
+                        Some(id) => call_signatures
+                            .entry(id)
+                            .or_default()
+                            .extend(strings(&opaque["thought_signatures"])),
                         None => {
                             if let Some(sig) = opaque.get("thought_signature").and_then(|v| v.as_str()) {
                                 parts.push(ContentPart::ThoughtSignature(sig.to_string()));
@@ -318,10 +325,18 @@ mod tests {
         let m = Message {
             role: Role::Assistant,
             parts: vec![
-                Part::Reasoning { opaque: serde_json::json!({"thought_signature": "turn-sig"}) },
-                Part::Reasoning { opaque: serde_json::json!({"tool_call_id": "c1", "thought_signatures": ["call-sig"]}) },
+                Part::Reasoning {
+                    opaque: serde_json::json!({"thought_signature": "turn-sig"}),
+                },
+                Part::Reasoning {
+                    opaque: serde_json::json!({"tool_call_id": "c1", "thought_signatures": ["call-sig"]}),
+                },
                 Part::Text("thinking done".into()),
-                Part::ToolCall { id: "c1".into(), name: "read_file".into(), args: serde_json::json!({"path": "a"}) },
+                Part::ToolCall {
+                    id: "c1".into(),
+                    name: "read_file".into(),
+                    args: serde_json::json!({"path": "a"}),
+                },
             ],
         };
         let out = convert_message(&m);
@@ -334,7 +349,14 @@ mod tests {
             p => panic!("{p:?}"),
         }
         // Tool results become one tool message each, after any text.
-        let m = Message { role: Role::User, parts: vec![Part::ToolResult { id: "c1".into(), content: "body".into(), is_error: false }] };
+        let m = Message {
+            role: Role::User,
+            parts: vec![Part::ToolResult {
+                id: "c1".into(),
+                content: "body".into(),
+                is_error: false,
+            }],
+        };
         assert_eq!(convert_message(&m).len(), 1);
     }
 

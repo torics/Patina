@@ -18,7 +18,14 @@ async fn fake_model(bodies: Vec<String>) -> u16 {
                 buf.extend_from_slice(&tmp[..got]);
                 let text = String::from_utf8_lossy(&buf).to_string();
                 if let Some(i) = text.find("\r\n\r\n") {
-                    let len = text[..i].lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap())).unwrap_or(0);
+                    let len = text[..i]
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap_or(0);
                     if buf.len() >= i + 4 + len {
                         break;
                     }
@@ -46,7 +53,10 @@ fn chunk(delta: serde_json::Value, finish: Option<&str>) -> serde_json::Value {
 }
 
 fn says(text: &str) -> String {
-    sse(&[chunk(serde_json::json!({"content": text}), None), chunk(serde_json::json!({}), Some("stop"))])
+    sse(&[
+        chunk(serde_json::json!({"content": text}), None),
+        chunk(serde_json::json!({}), Some("stop")),
+    ])
 }
 
 fn writes(path: &str, content: &str) -> String {
@@ -75,7 +85,9 @@ fn setup(port: u16) -> Setup {
     std::fs::create_dir_all(&repo).unwrap();
     std::fs::write(
         config.join("providers.toml"),
-        format!("schema_version = 1\n\n[[provider]]\nid = \"local\"\nkind = \"openai_compatible\"\nbase_url = \"http://127.0.0.1:{port}/v1\"\n"),
+        format!(
+            "schema_version = 1\n\n[[provider]]\nid = \"local\"\nkind = \"openai_compatible\"\nbase_url = \"http://127.0.0.1:{port}/v1\"\n"
+        ),
     )
     .unwrap();
     std::fs::write(
@@ -86,8 +98,16 @@ fn setup(port: u16) -> Setup {
     git(&repo, &["init", "-q", "-b", "main"]);
     std::fs::write(repo.join("README.md"), "hello\n").unwrap();
     git(&repo, &["add", "."]);
-    git(&repo, &["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "first"]);
-    Setup { _tmp: tmp, config, data, repo }
+    git(
+        &repo,
+        &["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "first"],
+    );
+    Setup {
+        _tmp: tmp,
+        config,
+        data,
+        repo,
+    }
 }
 
 async fn patina(s: &Setup, extra: &[&str]) -> (i32, String, String) {
@@ -100,7 +120,11 @@ async fn patina(s: &Setup, extra: &[&str]) -> (i32, String, String) {
         .output()
         .await
         .unwrap();
-    (out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stdout).to_string(), String::from_utf8_lossy(&out.stderr).to_string())
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).to_string(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+    )
 }
 
 #[tokio::test]
@@ -123,7 +147,15 @@ async fn json_output_is_one_event_per_line() {
     let s = setup(fake_model(vec![says("Hi.")]).await);
     let (code, out, _) = patina(&s, &["--json", "Say hi"]).await;
     assert_eq!(code, 0);
-    let kinds: Vec<String> = out.lines().map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["type"].as_str().unwrap().to_string()).collect();
+    let kinds: Vec<String> = out
+        .lines()
+        .map(|l| {
+            serde_json::from_str::<serde_json::Value>(l).unwrap()["type"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
     assert_eq!(kinds.first().map(String::as_str), Some("run_started"));
     assert_eq!(kinds.last().map(String::as_str), Some("run_finished"));
     assert!(kinds.contains(&"text".to_string()), "{kinds:?}");
@@ -163,14 +195,23 @@ async fn a_budget_stops_the_run_with_its_own_exit_code() {
     let s = setup(fake_model(vec![read]).await);
     let (code, out, err) = patina(&s, &["--max-steps", "2", "Read forever"]).await;
     assert_eq!(code, 4, "{out}\n{err}");
-    assert!(out.contains("[tool] read_file ok: ") && out.contains("[run] budget_exceeded: 2 steps") && out.contains("the step limit"), "{out}");
+    assert!(
+        out.contains("[tool] read_file ok: ") && out.contains("[run] budget_exceeded: 2 steps") && out.contains("the step limit"),
+        "{out}"
+    );
 }
 
 #[tokio::test]
 async fn unknown_agents_and_folders_that_are_not_repositories_are_refused() {
     let s = setup(fake_model(vec![says("x")]).await);
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_patina"))
-        .args(["run", "--config-dir", s.config.to_str().unwrap(), "--data-dir", s.data.to_str().unwrap()])
+        .args([
+            "run",
+            "--config-dir",
+            s.config.to_str().unwrap(),
+            "--data-dir",
+            s.data.to_str().unwrap(),
+        ])
         .args(["--project", s.repo.to_str().unwrap(), "--team", "nobody", "hi"])
         .output()
         .unwrap();
@@ -180,11 +221,69 @@ async fn unknown_agents_and_folders_that_are_not_repositories_are_refused() {
     let plain = s.config.parent().unwrap().join("plain");
     std::fs::create_dir_all(&plain).unwrap();
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_patina"))
-        .args(["run", "--config-dir", s.config.to_str().unwrap(), "--data-dir", s.data.to_str().unwrap()])
+        .args([
+            "run",
+            "--config-dir",
+            s.config.to_str().unwrap(),
+            "--data-dir",
+            s.data.to_str().unwrap(),
+        ])
         .args(["--project", plain.to_str().unwrap(), "--team", "dev", "hi"])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("not the top level of a git repository"), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("not the top level of a git repository"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(!plain.join(".git").exists());
+}
+
+/// The interactive path, with a real pseudo-terminal from util-linux `script`: the owner approves an edit by typing.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn an_edit_approved_on_the_terminal_lands_on_the_run_branch_only() {
+    let s = setup(fake_model(vec![writes("NOTES.md", "written by the agent\n"), says("Done.")]).await);
+    let command = format!(
+        "{} run --config-dir {} --data-dir {} --project {} --team dev 'Write notes'",
+        env!("CARGO_BIN_EXE_patina"),
+        s.config.display(),
+        s.data.display(),
+        s.repo.display()
+    );
+    let mut child = tokio::process::Command::new("script")
+        .args(["-qec", &command, "/dev/null"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("util-linux `script` is needed for this test");
+    // The answer waits in the terminal's buffer until the prompt reads it. Stdin stays open until the run ends.
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"a\n").await.unwrap();
+    let mut out = String::new();
+    child.stdout.take().unwrap().read_to_string(&mut out).await.unwrap();
+    let status = child.wait().await.unwrap();
+    drop(stdin);
+    assert_eq!(status.code(), Some(0), "{out}");
+    for expected in [
+        "[approval needed] write_file",
+        "+written by the agent",
+        "[approval] approve",
+        "[checkpoint] step 1",
+        "Done.",
+        "[run] completed",
+        "1 file(s) changed",
+        "A NOTES.md",
+    ] {
+        assert!(out.contains(expected), "missing {expected:?} in:\n{out}");
+    }
+    assert!(!s.repo.join("NOTES.md").exists());
+    let branch = git(&s.repo, &["branch", "--list", "patina/run-*", "--format=%(refname:short)"]);
+    assert_eq!(git(&s.repo, &["show", &format!("{branch}:NOTES.md")]), "written by the agent");
+    assert_eq!(
+        git(&s.repo, &["log", "-1", "--format=%an <%ae>", &branch]),
+        "Patina <patina@localhost>"
+    );
 }

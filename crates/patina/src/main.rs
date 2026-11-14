@@ -100,10 +100,24 @@ async fn main() -> Result<ExitCode> {
             prompt,
         } => {
             // Logs go to stderr and only warnings, so stdout carries nothing but the run.
-            let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
-            tracing_subscriber::fmt().with_env_filter(filter).with_writer(std::io::stderr).init();
+            let filter =
+                tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_writer(std::io::stderr)
+                .init();
             let paths = open_paths(config_dir, data_dir)?;
-            let args = run::RunArgs { project, team, prompt, yes, json, max_steps, max_tokens, max_cost_usd, max_wall_clock_s };
+            let args = run::RunArgs {
+                project,
+                team,
+                prompt,
+                yes,
+                json,
+                max_steps,
+                max_tokens,
+                max_cost_usd,
+                max_wall_clock_s,
+            };
             return Ok(ExitCode::from(run::run(paths, args).await?));
         }
         Command::Version => {

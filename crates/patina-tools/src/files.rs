@@ -12,6 +12,9 @@ pub const MAX_READ_LINES: usize = 2000;
 pub const MAX_READ_BYTES: usize = 100 * 1024;
 const MAX_SEARCH_LINE: usize = 400;
 
+/// Names of the built-in file tools, in the order `file_tools` returns them.
+pub const TOOL_NAMES: [&str; 5] = ["list_files", "read_file", "search", "edit_file", "write_file"];
+
 /// The built-in file tools for one workspace, by name.
 pub fn file_tools(ws: Arc<Workspace>) -> Vec<Arc<dyn Tool>> {
     vec![
@@ -604,5 +607,12 @@ mod tests {
         assert_eq!(all.content, "no matches");
         let listing = call(&f, "list_files", json!({"path": ".", "depth": 5})).await;
         assert!(!listing.content.contains("secret.txt"), "{}", listing.content);
+    }
+
+    #[test]
+    fn the_name_list_matches_the_tools() {
+        let f = fixture();
+        let names: Vec<String> = file_tools(f.ws.clone()).iter().map(|t| t.spec().name).collect();
+        assert_eq!(names, TOOL_NAMES);
     }
 }

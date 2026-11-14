@@ -41,12 +41,16 @@ fn run_from_row(r: &rusqlite::Row) -> rusqlite::Result<RunRow> {
     })
 }
 
-const RUN_COLS: &str =
-    "id, project_id, team_id, prompt, status, budgets_json, usage_json, worktree_path, branch, base_commit, disposition, created_at, updated_at";
+const RUN_COLS: &str = "id, project_id, team_id, prompt, status, budgets_json, usage_json, worktree_path, branch, base_commit, disposition, created_at, updated_at";
 
 pub async fn create_run(db: &Db, id: &str, project_id: &str, team_id: &str, prompt: &str, budgets: &Value) -> Result<(), StoreError> {
-    let (id, project_id, team_id, prompt, budgets) =
-        (id.to_string(), project_id.to_string(), team_id.to_string(), prompt.to_string(), budgets.to_string());
+    let (id, project_id, team_id, prompt, budgets) = (
+        id.to_string(),
+        project_id.to_string(),
+        team_id.to_string(),
+        prompt.to_string(),
+        budgets.to_string(),
+    );
     db.call(move |c| {
         let now = now_ms();
         c.execute(
@@ -61,9 +65,17 @@ pub async fn create_run(db: &Db, id: &str, project_id: &str, team_id: &str, prom
 
 /// Record where the run works: its worktree, branch and the commit it started from.
 pub async fn set_worktree(db: &Db, id: &str, worktree: Option<&str>, branch: Option<&str>, base: Option<&str>) -> Result<(), StoreError> {
-    let (id, w, b, c0) = (id.to_string(), worktree.map(str::to_string), branch.map(str::to_string), base.map(str::to_string));
+    let (id, w, b, c0) = (
+        id.to_string(),
+        worktree.map(str::to_string),
+        branch.map(str::to_string),
+        base.map(str::to_string),
+    );
     db.call(move |c| {
-        c.execute("UPDATE runs SET worktree_path = ?2, branch = ?3, base_commit = ?4, updated_at = ?5 WHERE id = ?1", params![id, w, b, c0, now_ms()])?;
+        c.execute(
+            "UPDATE runs SET worktree_path = ?2, branch = ?3, base_commit = ?4, updated_at = ?5 WHERE id = ?1",
+            params![id, w, b, c0, now_ms()],
+        )?;
         Ok(())
     })
     .await
@@ -73,7 +85,10 @@ pub async fn set_worktree(db: &Db, id: &str, worktree: Option<&str>, branch: Opt
 pub async fn set_disposition(db: &Db, id: &str, disposition: &str, keep_branch: bool) -> Result<(), StoreError> {
     let (id, d) = (id.to_string(), disposition.to_string());
     db.call(move |c| {
-        c.execute("UPDATE runs SET disposition = ?2, worktree_path = NULL, updated_at = ?3 WHERE id = ?1", params![id, d, now_ms()])?;
+        c.execute(
+            "UPDATE runs SET disposition = ?2, worktree_path = NULL, updated_at = ?3 WHERE id = ?1",
+            params![id, d, now_ms()],
+        )?;
         if !keep_branch {
             c.execute("UPDATE runs SET branch = NULL WHERE id = ?1", params![id])?;
         }
@@ -85,7 +100,10 @@ pub async fn set_disposition(db: &Db, id: &str, disposition: &str, keep_branch: 
 pub async fn set_budgets(db: &Db, id: &str, budgets: &Value) -> Result<(), StoreError> {
     let (id, b) = (id.to_string(), budgets.to_string());
     db.call(move |c| {
-        c.execute("UPDATE runs SET budgets_json = ?2, updated_at = ?3 WHERE id = ?1", params![id, b, now_ms()])?;
+        c.execute(
+            "UPDATE runs SET budgets_json = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, b, now_ms()],
+        )?;
         Ok(())
     })
     .await
@@ -117,7 +135,14 @@ pub async fn list_checkpoints(db: &Db, run_id: &str) -> Result<Vec<CheckpointRow
     db.call(move |c| {
         let mut s = c.prepare("SELECT step, commit_sha, summary, created_at FROM checkpoints WHERE run_id = ?1 ORDER BY step")?;
         let rows = s
-            .query_map([run_id], |r| Ok(CheckpointRow { step: r.get(0)?, commit_sha: r.get(1)?, summary: r.get(2)?, created_at: r.get(3)? }))?
+            .query_map([run_id], |r| {
+                Ok(CheckpointRow {
+                    step: r.get(0)?,
+                    commit_sha: r.get(1)?,
+                    summary: r.get(2)?,
+                    created_at: r.get(3)?,
+                })
+            })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     })
@@ -137,8 +162,14 @@ pub async fn drop_checkpoints_after(db: &Db, run_id: &str, step: i64) -> Result<
 /// Number of messages stored for an agent, which is the index of its next one.
 pub async fn message_count(db: &Db, run_id: &str, agent_id: &str) -> Result<i64, StoreError> {
     let (run_id, agent_id) = (run_id.to_string(), agent_id.to_string());
-    db.call(move |c| Ok(c.query_row("SELECT COUNT(*) FROM messages WHERE run_id = ?1 AND agent_id = ?2", params![run_id, agent_id], |r| r.get(0))?))
-        .await
+    db.call(move |c| {
+        Ok(c.query_row(
+            "SELECT COUNT(*) FROM messages WHERE run_id = ?1 AND agent_id = ?2",
+            params![run_id, agent_id],
+            |r| r.get(0),
+        )?)
+    })
+    .await
 }
 
 pub async fn set_status(db: &Db, id: &str, status: &str) -> Result<(), StoreError> {
@@ -324,15 +355,30 @@ mod tests {
     #[tokio::test]
     async fn worktree_checkpoints_and_disposition() {
         let (_t, db) = db().await;
-        create_run(&db, "r1", "site", "agent:a", "p", &json!({"max_steps": 5})).await.unwrap();
-        set_worktree(&db, "r1", Some("/w/r1"), Some("patina/run-r1"), Some("abc")).await.unwrap();
+        create_run(&db, "r1", "site", "agent:a", "p", &json!({"max_steps": 5}))
+            .await
+            .unwrap();
+        set_worktree(&db, "r1", Some("/w/r1"), Some("patina/run-r1"), Some("abc"))
+            .await
+            .unwrap();
         add_checkpoint(&db, "r1", 1, "c1", "write_file").await.unwrap();
         add_checkpoint(&db, "r1", 3, "c3", "edit_file").await.unwrap();
-        assert_eq!(list_checkpoints(&db, "r1").await.unwrap().iter().map(|c| c.step).collect::<Vec<_>>(), [1, 3]);
+        assert_eq!(
+            list_checkpoints(&db, "r1")
+                .await
+                .unwrap()
+                .iter()
+                .map(|c| c.step)
+                .collect::<Vec<_>>(),
+            [1, 3]
+        );
         drop_checkpoints_after(&db, "r1", 1).await.unwrap();
         assert_eq!(list_checkpoints(&db, "r1").await.unwrap().len(), 1);
         let r = get_run(&db, "r1").await.unwrap().unwrap();
-        assert_eq!((r.budgets["max_steps"].clone(), r.branch.as_deref(), r.disposition.clone()), (json!(5), Some("patina/run-r1"), None));
+        assert_eq!(
+            (r.budgets["max_steps"].clone(), r.branch.as_deref(), r.disposition.clone()),
+            (json!(5), Some("patina/run-r1"), None)
+        );
         set_disposition(&db, "r1", "merged", false).await.unwrap();
         let r = get_run(&db, "r1").await.unwrap().unwrap();
         assert_eq!((r.worktree_path, r.branch, r.disposition.as_deref()), (None, None, Some("merged")));

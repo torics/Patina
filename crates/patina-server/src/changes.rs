@@ -44,8 +44,18 @@ fn source(st: &AppState, run: &store::RunRow) -> ApiResult<Source> {
         return Err(ApiError::conflict("no_changes", why));
     };
     match &run.worktree_path {
-        Some(w) => Ok(Source { dir: PathBuf::from(w), target: "HEAD".into(), base, branch }),
-        None => Ok(Source { dir: PathBuf::from(st.project(&run.project_id)?.path), target: branch.clone(), base, branch }),
+        Some(w) => Ok(Source {
+            dir: PathBuf::from(w),
+            target: "HEAD".into(),
+            base,
+            branch,
+        }),
+        None => Ok(Source {
+            dir: PathBuf::from(st.project(&run.project_id)?.path),
+            target: branch.clone(),
+            base,
+            branch,
+        }),
     }
 }
 
@@ -69,7 +79,14 @@ pub async fn diff(State(st): St, Path(id): Path<String>, Query(q): Query<DiffQue
     if q.format.as_deref() == Some("patch") {
         // A plain patch file that `git apply` accepts.
         let name = format!("attachment; filename=\"{}.patch\"", src.branch.replace('/', "-"));
-        return Ok(([(header::CONTENT_TYPE, "text/x-diff; charset=utf-8".to_string()), (header::CONTENT_DISPOSITION, name)], text).into_response());
+        return Ok((
+            [
+                (header::CONTENT_TYPE, "text/x-diff; charset=utf-8".to_string()),
+                (header::CONTENT_DISPOSITION, name),
+            ],
+            text,
+        )
+            .into_response());
     }
     let files = git::changed_files(&src.dir, &src.base, &src.target)
         .await
@@ -77,34 +94,71 @@ pub async fn diff(State(st): St, Path(id): Path<String>, Query(q): Query<DiffQue
         .into_iter()
         .map(|(status, path)| ChangedFile { status, path })
         .collect();
-    Ok(Json(DiffView { base_commit: src.base, branch: src.branch, files, diff: text }).into_response())
+    Ok(Json(DiffView {
+        base_commit: src.base,
+        branch: src.branch,
+        files,
+        diff: text,
+    })
+    .into_response())
 }
 
 pub async fn checkpoints(State(st): St, Path(id): Path<String>) -> ApiResult<Json<Vec<CheckpointView>>> {
     load(&st, &id).await?;
     let rows = store::list_checkpoints(&st.db, &id).await?;
-    Ok(Json(rows.into_iter().map(|c| CheckpointView { step: c.step as u32, commit: c.commit_sha, summary: c.summary, created_at: c.created_at }).collect()))
+    Ok(Json(
+        rows.into_iter()
+            .map(|c| CheckpointView {
+                step: c.step as u32,
+                commit: c.commit_sha,
+                summary: c.summary,
+                created_at: c.created_at,
+            })
+            .collect(),
+    ))
 }
 
 /// Reset the worktree to a checkpoint (step 0 is the base commit), log it, and tell the agent the files changed.
 pub async fn rollback(State(st): St, Path(id): Path<String>, Json(input): Json<RollbackInput>) -> ApiResult<Json<Vec<CheckpointView>>> {
     let run = load(&st, &id).await?;
     require_idle(&st, &run)?;
-    let worktree = run.worktree_path.clone().map(PathBuf::from).ok_or_else(|| ApiError::conflict("no_worktree", "this run has no worktree"))?;
+    let worktree = run
+        .worktree_path
+        .clone()
+        .map(PathBuf::from)
+        .ok_or_else(|| ApiError::conflict("no_worktree", "this run has no worktree"))?;
     let all = store::list_checkpoints(&st.db, &id).await?;
     let commit = if input.step == 0 {
-        run.base_commit.clone().ok_or_else(|| ApiError::internal("run has no base commit"))?
+        run.base_commit
+            .clone()
+            .ok_or_else(|| ApiError::internal("run has no base commit"))?
     } else {
-        all.iter().find(|c| c.step == input.step as i64).map(|c| c.commit_sha.clone()).ok_or_else(|| ApiError::not_found("checkpoint"))?
+        all.iter()
+            .find(|c| c.step == input.step as i64)
+            .map(|c| c.commit_sha.clone())
+            .ok_or_else(|| ApiError::not_found("checkpoint"))?
     };
     git::rollback(&worktree, &commit).await.map_err(git_err)?;
     store::drop_checkpoints_after(&st.db, &id, input.step as i64).await?;
-    store::append_event(&st.db, &id, None, EventType::Rollback.as_str(), json!({"step": input.step, "commit": commit})).await?;
+    store::append_event(
+        &st.db,
+        &id,
+        None,
+        EventType::Rollback.as_str(),
+        json!({"step": input.step, "commit": commit}),
+    )
+    .await?;
     // The agent's context still describes the old files. Leave it a note for when the run continues.
     if let Some(agent) = run.team_id.strip_prefix("agent:") {
         let idx = store::message_count(&st.db, &id, agent).await?;
-        let to = if input.step == 0 { "its starting point".to_string() } else { format!("the checkpoint of step {}", input.step) };
-        let note = format!("Note from Patina: the owner rolled the workspace back to {to}. Files may differ from what you last saw; read them again before editing.");
+        let to = if input.step == 0 {
+            "its starting point".to_string()
+        } else {
+            format!("the checkpoint of step {}", input.step)
+        };
+        let note = format!(
+            "Note from Patina: the owner rolled the workspace back to {to}. Files may differ from what you last saw; read them again before editing."
+        );
         store::save_message(&st.db, &id, agent, idx, &Message::user(note)).await?;
     }
     checkpoints(State(st), Path(id)).await
@@ -114,7 +168,10 @@ pub async fn rollback(State(st): St, Path(id): Path<String>, Json(input): Json<R
 pub async fn merge(State(st): St, Path(id): Path<String>) -> ApiResult<Json<MergeResult>> {
     let run = load(&st, &id).await?;
     require_idle(&st, &run)?;
-    let branch = run.branch.clone().ok_or_else(|| ApiError::conflict("no_changes", "this run has no branch to merge"))?;
+    let branch = run
+        .branch
+        .clone()
+        .ok_or_else(|| ApiError::conflict("no_changes", "this run has no branch to merge"))?;
     let repo = PathBuf::from(st.project(&run.project_id)?.path);
     let into_branch = git::current_branch(&repo).await.map_err(git_err)?;
     let merged = git::merge(&repo, &branch).await.map_err(git_err)?;
@@ -129,14 +186,20 @@ pub async fn merge(State(st): St, Path(id): Path<String>) -> ApiResult<Json<Merg
         Merged::MergeCommit => "merge_commit",
         Merged::AlreadyUpToDate => "already_up_to_date",
     };
-    Ok(Json(MergeResult { result: result.into(), into_branch }))
+    Ok(Json(MergeResult {
+        result: result.into(),
+        into_branch,
+    }))
 }
 
 /// Remove the worktree. The branch is deleted too, unless `keep_branch` is set.
 pub async fn discard(State(st): St, Path(id): Path<String>, Json(input): Json<DiscardInput>) -> ApiResult<Json<RunView>> {
     let run = load(&st, &id).await?;
     require_idle(&st, &run)?;
-    let branch = run.branch.clone().ok_or_else(|| ApiError::conflict("no_changes", "this run has no branch"))?;
+    let branch = run
+        .branch
+        .clone()
+        .ok_or_else(|| ApiError::conflict("no_changes", "this run has no branch"))?;
     let repo = PathBuf::from(st.project(&run.project_id)?.path);
     if let Some(w) = &run.worktree_path {
         git::remove_worktree(&repo, &PathBuf::from(w)).await.map_err(git_err)?;

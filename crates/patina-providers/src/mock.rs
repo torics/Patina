@@ -40,13 +40,26 @@ impl Script {
     pub fn tool_calls(calls: &[(&str, &str, serde_json::Value)]) -> Script {
         let mut events = vec![];
         for (id, name, args) in calls {
-            events.push(Ok(StreamEvent::ToolCallStart { id: id.to_string(), name: name.to_string() }));
-            events.push(Ok(StreamEvent::ToolCallArgsDelta { id: id.to_string(), fragment: args.to_string() }));
+            events.push(Ok(StreamEvent::ToolCallStart {
+                id: id.to_string(),
+                name: name.to_string(),
+            }));
+            events.push(Ok(StreamEvent::ToolCallArgsDelta {
+                id: id.to_string(),
+                fragment: args.to_string(),
+            }));
             events.push(Ok(StreamEvent::ToolCallEnd { id: id.to_string() }));
         }
-        events.push(Ok(StreamEvent::Usage { input_tokens: 10, output_tokens: 10, cached_tokens: 0 }));
+        events.push(Ok(StreamEvent::Usage {
+            input_tokens: 10,
+            output_tokens: 10,
+            cached_tokens: 0,
+        }));
         events.push(Ok(StreamEvent::Stop(StopReason::ToolUse)));
-        Script { events, ..Script::default() }
+        Script {
+            events,
+            ..Script::default()
+        }
     }
 
     pub fn with_delay(mut self, d: Duration) -> Script {

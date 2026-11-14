@@ -43,12 +43,21 @@ async fn project_for(st: &AppState, path: &std::path::Path) -> Result<ProjectCon
     if let Some(p) = known.projects.iter().find(|p| std::path::Path::new(&p.path) == path) {
         return Ok(p.clone());
     }
-    let folder = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "project".into());
+    let folder = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "project".into());
     let mut last = None;
     // The folder name is the id; a different folder with the same name gets a numbered id.
     for n in 1..=20 {
         let name = if n == 1 { folder.clone() } else { format!("{folder}-{n}") };
-        let input = NewProject { id: None, name: Some(name), path: path.to_string_lossy().to_string(), policy: None, init_git: false };
+        let input = NewProject {
+            id: None,
+            name: Some(name),
+            path: path.to_string_lossy().to_string(),
+            policy: None,
+            init_git: false,
+        };
         match projects::register(st, input).await {
             Ok(p) => {
                 eprintln!("Registered {} as project {:?} with the default policy.", p.path, p.id);
@@ -99,7 +108,13 @@ impl Printer {
         self.close_text(out)?;
         match ev.kind.as_str() {
             "run_started" => writeln!(out, "[run] started, policy {}", s("policy"))?,
-            "agent_started" => writeln!(out, "[agent {}] model {} on {}", ev.agent_id.as_deref().unwrap_or(""), s("model"), s("provider"))?,
+            "agent_started" => writeln!(
+                out,
+                "[agent {}] model {} on {}",
+                ev.agent_id.as_deref().unwrap_or(""),
+                s("model"),
+                s("provider")
+            )?,
             "tool_call" => writeln!(out, "[tool] {} {}", s("name"), one_line(&p["args"], 200))?,
             "tool_result" => {
                 let state = if p["is_error"].as_bool().unwrap_or(false) { "error" } else { "ok" };
@@ -109,20 +124,32 @@ impl Printer {
             "checkpoint" => writeln!(out, "[checkpoint] step {}, {}", p["step"], s("summary"))?,
             "rollback" => writeln!(out, "[rollback] to step {}", p["step"])?,
             "error" => {
-                let retry = if p["retrying"].as_bool().unwrap_or(false) { " (retrying)" } else { "" };
+                let retry = if p["retrying"].as_bool().unwrap_or(false) {
+                    " (retrying)"
+                } else {
+                    ""
+                };
                 writeln!(out, "[error] {}{retry}", s("message"))?
             }
             "run_finished" => {
                 let u = &p["usage"];
+                // A model without a configured price has an unknown cost, which is not the same as free.
+                let cost = u["cost_usd"]
+                    .as_f64()
+                    .map(|c| format!("${c:.4}"))
+                    .unwrap_or_else(|| "cost unknown".into());
+                let estimated = if u["estimated"].as_bool().unwrap_or(false) {
+                    " (estimated)"
+                } else {
+                    ""
+                };
                 writeln!(
                     out,
-                    "[run] {}: {} steps, {} tokens in, {} tokens out, ${:.4}{}",
+                    "[run] {}: {} steps, {} tokens in, {} tokens out{estimated}, {cost}",
                     s("status"),
                     u["steps"],
                     u["input_tokens"],
-                    u["output_tokens"],
-                    u["cost_usd"].as_f64().unwrap_or(0.0),
-                    if u["estimated"].as_bool().unwrap_or(false) { " (estimated)" } else { "" }
+                    u["output_tokens"]
                 )?;
                 if let Some(e) = p["error"].as_str() {
                     writeln!(out, "[run] {e}")?;
@@ -138,7 +165,12 @@ impl Printer {
 /// Ask on the terminal what to do with one tool call. Reads lines until one is a valid answer.
 /// The end of input counts as a denial, so a closed terminal can never approve.
 pub fn ask(input: &mut dyn BufRead, out: &mut dyn Write, payload: &Value) -> std::io::Result<ApprovalAnswer> {
-    writeln!(out, "\n[approval needed] {} {}", payload["name"].as_str().unwrap_or(""), payload["args"])?;
+    writeln!(
+        out,
+        "\n[approval needed] {} {}",
+        payload["name"].as_str().unwrap_or(""),
+        payload["args"]
+    )?;
     if let Some(diff) = payload["diff"].as_str() {
         writeln!(out, "{}", diff.trim_end())?;
     }
@@ -157,7 +189,11 @@ pub fn ask(input: &mut dyn BufRead, out: &mut dyn Write, payload: &Value) -> std
                 out.flush()?;
                 let mut note = String::new();
                 input.read_line(&mut note)?;
-                return Ok(answer(ApprovalAction::Deny, Some(note.trim().to_string()).filter(|n| !n.is_empty()), None));
+                return Ok(answer(
+                    ApprovalAction::Deny,
+                    Some(note.trim().to_string()).filter(|n| !n.is_empty()),
+                    None,
+                ));
             }
             "e" | "edit" => {
                 write!(out, "New arguments as one line of JSON: ")?;
@@ -200,10 +236,20 @@ pub async fn run(paths: Paths, args: RunArgs) -> Result<u8> {
     if args.max_wall_clock_s.is_some() {
         budgets.max_wall_clock_s = args.max_wall_clock_s;
     }
-    let input = NewRun { agent_id: args.team.clone(), prompt: args.prompt.clone(), project_id: Some(project.id.clone()), budgets: Some(budgets) };
+    let input = NewRun {
+        agent_id: args.team.clone(),
+        prompt: args.prompt.clone(),
+        project_id: Some(project.id.clone()),
+        budgets: Some(budgets),
+    };
     let (row, handle) = engine::start_run(&st, input).await.map_err(api)?;
     if !args.json {
-        eprintln!("Run {} in project {:?} on branch {}.", row.id, project.id, row.branch.as_deref().unwrap_or("?"));
+        eprintln!(
+            "Run {} in project {:?} on branch {}.",
+            row.id,
+            project.id,
+            row.branch.as_deref().unwrap_or("?")
+        );
     }
 
     // Subscribed before the log is read, so nothing between the two is missed.
@@ -244,7 +290,8 @@ pub async fn run(paths: Paths, args: RunArgs) -> Result<u8> {
             continue;
         }
         let payload = ev.payload.clone();
-        let answer = tokio::task::spawn_blocking(move || ask(&mut std::io::stdin().lock(), &mut std::io::stderr().lock(), &payload)).await??;
+        let answer =
+            tokio::task::spawn_blocking(move || ask(&mut std::io::stdin().lock(), &mut std::io::stderr().lock(), &payload)).await??;
         match engine::answer_approval(&st, &row.id, &approval_id, answer).await {
             Ok(()) => {}
             // The run was stopped while the question was open.
@@ -258,7 +305,9 @@ pub async fn run(paths: Paths, args: RunArgs) -> Result<u8> {
     if !args.json
         && let (Some(branch), Some(base), Some(worktree)) = (&done.branch, &done.base_commit, &done.worktree_path)
     {
-        let changed = patina_tools::git::changed_files(std::path::Path::new(worktree), base, "HEAD").await.unwrap_or_default();
+        let changed = patina_tools::git::changed_files(std::path::Path::new(worktree), base, "HEAD")
+            .await
+            .unwrap_or_default();
         if changed.is_empty() {
             eprintln!("The run changed no files. Its worktree is {worktree}.");
         } else {
@@ -314,7 +363,10 @@ mod tests {
         let (a, shown) = asked("e\nnot json\ne\n[1]\ne\n{\"path\":\"b.txt\"}\n");
         assert_eq!(a.action, ApprovalAction::Edit);
         assert_eq!(a.args, Some(json!({"path": "b.txt"})));
-        assert!(shown.contains("not valid JSON") && shown.contains("must be a JSON object"), "{shown}");
+        assert!(
+            shown.contains("not valid JSON") && shown.contains("must be a JSON object"),
+            "{shown}"
+        );
     }
 
     #[test]
@@ -327,22 +379,37 @@ mod tests {
 
     #[test]
     fn the_printer_joins_text_pieces_and_closes_the_line_before_the_next_event() {
-        let ev = |seq, kind: &str, payload| Event { run_id: "r".into(), seq, ts: 0, agent_id: Some("dev".into()), kind: kind.into(), payload };
+        let ev = |seq, kind: &str, payload| Event {
+            run_id: "r".into(),
+            seq,
+            ts: 0,
+            agent_id: Some("dev".into()),
+            kind: kind.into(),
+            payload,
+        };
         let mut out = Vec::new();
         let mut p = Printer::default();
         for e in [
             ev(1, "text", json!({"text": "Hel"})),
             ev(2, "text", json!({"text": "lo"})),
             ev(3, "tool_call", json!({"name": "read_file", "args": {"path": "a.txt"}})),
-            ev(4, "tool_result", json!({"name": "read_file", "content": "one\ntwo", "is_error": false})),
-            ev(5, "run_finished", json!({"status": "completed", "usage": {"steps": 2, "input_tokens": 10, "output_tokens": 4, "cost_usd": 0.0, "estimated": true}})),
+            ev(
+                4,
+                "tool_result",
+                json!({"name": "read_file", "content": "one\ntwo", "is_error": false}),
+            ),
+            ev(
+                5,
+                "run_finished",
+                json!({"status": "completed", "usage": {"steps": 2, "input_tokens": 10, "output_tokens": 4, "cost_usd": null, "estimated": true}}),
+            ),
         ] {
             p.print(&mut out, &e).unwrap();
         }
         let text = String::from_utf8(out).unwrap();
         assert_eq!(
             text,
-            "Hello\n[tool] read_file {\"path\":\"a.txt\"}\n[tool] read_file ok: one two\n[run] completed: 2 steps, 10 tokens in, 4 tokens out, $0.0000 (estimated)\n"
+            "Hello\n[tool] read_file {\"path\":\"a.txt\"}\n[tool] read_file ok: one two\n[run] completed: 2 steps, 10 tokens in, 4 tokens out (estimated), cost unknown\n"
         );
     }
 }

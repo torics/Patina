@@ -1,8 +1,11 @@
 use crate::auth::Limiter;
 use crate::error::{ApiError, ApiResult};
+use patina_core::agent::ApprovalDecision;
 use patina_core::agent_config::AgentConfig;
+use patina_core::budget::BudgetTracker;
 use patina_core::config::write_atomic;
 use patina_core::events::Event;
+use patina_core::project_config::{ProjectConfig, ProjectsFile};
 use patina_core::provider::{ChatProvider, ProviderError};
 use patina_core::provider_config::{ProviderProfile, ProvidersFile};
 use patina_core::{Config, Paths};
@@ -12,9 +15,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
-use patina_core::agent::ApprovalDecision;
-use patina_core::budget::BudgetTracker;
-use patina_core::project_config::{ProjectConfig, ProjectsFile};
 use tokio::sync::{broadcast, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -168,7 +168,10 @@ impl AppState {
     }
 
     pub fn project(&self, id: &str) -> ApiResult<ProjectConfig> {
-        self.projects()?.get(id).cloned().ok_or_else(|| ApiError::bad_request(format!("project {id:?} does not exist")))
+        self.projects()?
+            .get(id)
+            .cloned()
+            .ok_or_else(|| ApiError::bad_request(format!("project {id:?} does not exist")))
     }
 
     pub fn worktree_dir(&self, run_id: &str) -> PathBuf {
