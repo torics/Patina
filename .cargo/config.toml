@@ -1,0 +1,7 @@
+[alias]
+xtask = "run --quiet --package xtask --"
+
+[env]
+# ts-rs writes the UI's API types here during `cargo test -p patina-core export_bindings`.
+TS_RS_EXPORT_DIR = { value = "ui/src/api/generated", relative = true }
+TS_RS_LARGE_INT = "number"

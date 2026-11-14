@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 /// Event types of section 6. Stored as the snake_case string.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -74,7 +75,8 @@ impl RunStatus {
 }
 
 /// One persisted event. `seq` starts at 1 within a run.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[ts(export)]
 pub struct Event {
     pub run_id: String,
     pub seq: i64,
@@ -83,6 +85,7 @@ pub struct Event {
     pub agent_id: Option<String>,
     #[serde(rename = "type")]
     pub kind: String,
+    #[ts(type = "Record<string, any>")]
     pub payload: serde_json::Value,
 }
 

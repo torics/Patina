@@ -35,6 +35,7 @@ getrandom = "0.4"
 patina-core = { path = "crates/patina-core" }
 patina-store = { path = "crates/patina-store" }
 patina-server = { path = "crates/patina-server" }
+patina-providers = { path = "crates/patina-providers" }
 
 [profile.release]
 opt-level = "s"

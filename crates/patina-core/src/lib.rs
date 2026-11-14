@@ -2,6 +2,8 @@
 //! This crate must not depend on axum, SQLite or any provider SDK.
 
 pub mod agent;
+pub mod agent_config;
+pub mod api;
 pub mod config;
 pub mod events;
 pub mod paths;
