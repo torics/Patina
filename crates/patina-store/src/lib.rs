@@ -1,4 +1,8 @@
 //! SQLite storage: schema, migrations and the connection setup.
+pub mod auth;
+pub mod runs;
+pub mod secrets;
+
 use rusqlite::Connection;
 use std::path::Path;
 
@@ -8,6 +12,10 @@ pub enum StoreError {
     Sqlite(#[from] rusqlite::Error),
     #[error("database schema version {0} is newer than this build supports ({1})")]
     TooNew(i64, i64),
+    #[error("{0}")]
+    Other(String),
+    #[error("database writer stopped")]
+    Closed,
 }
 
 /// Each entry is one migration; `PRAGMA user_version` records how many have run.
@@ -38,7 +46,49 @@ const MIGRATIONS: &[&str] = &[
      CREATE TABLE sessions(
         token_hash TEXT PRIMARY KEY, csrf_token TEXT NOT NULL,
         created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);",
+    // 2: owner settings (password hash, setup token hash)
+    "CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);",
 ];
+
+type Job = Box<dyn FnOnce(&mut Connection) + Send>;
+
+/// Handle to the database. One dedicated thread owns the connection, so writes are serialized
+/// and never block the async runtime. Cloning the handle shares that thread.
+#[derive(Clone)]
+pub struct Db {
+    tx: std::sync::mpsc::Sender<Job>,
+}
+
+impl Db {
+    pub fn open(path: &Path) -> Result<Db, StoreError> {
+        let mut conn = open(path)?;
+        let (tx, rx) = std::sync::mpsc::channel::<Job>();
+        std::thread::Builder::new()
+            .name("patina-db-writer".into())
+            .spawn(move || {
+                while let Ok(job) = rx.recv() {
+                    job(&mut conn);
+                }
+            })
+            .map_err(|e| StoreError::Other(e.to_string()))?;
+        Ok(Db { tx })
+    }
+
+    /// Run `f` on the writer thread and wait for its result.
+    pub async fn call<T, F>(&self, f: F) -> Result<T, StoreError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T, StoreError> + Send + 'static,
+    {
+        let (otx, orx) = tokio::sync::oneshot::channel();
+        self.tx
+            .send(Box::new(move |c| {
+                let _ = otx.send(f(c));
+            }))
+            .map_err(|_| StoreError::Closed)?;
+        orx.await.map_err(|_| StoreError::Closed)?
+    }
+}
 
 pub fn schema_version() -> i64 {
     MIGRATIONS.len() as i64
