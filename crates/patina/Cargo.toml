@@ -1,0 +1,22 @@
+[package]
+name = "patina"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "patina"
+path = "src/main.rs"
+
+[dependencies]
+patina-core.workspace = true
+patina-store.workspace = true
+patina-server.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
