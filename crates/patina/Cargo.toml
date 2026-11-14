@@ -12,6 +12,9 @@ path = "src/main.rs"
 patina-core.workspace = true
 patina-store.workspace = true
 patina-server.workspace = true
+patina-tools.workspace = true
+futures.workspace = true
+serde_json.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tokio.workspace = true
@@ -20,3 +23,4 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio = { workspace = true, features = ["io-util", "process"] }

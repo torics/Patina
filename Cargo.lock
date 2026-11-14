@@ -1616,9 +1616,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "futures",
  "patina-core",
  "patina-server",
  "patina-store",
+ "patina-tools",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",

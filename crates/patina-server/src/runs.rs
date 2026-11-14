@@ -8,7 +8,7 @@ use axum::{
     http::HeaderMap,
     response::sse::{Event as SseEvent, KeepAlive, Sse},
 };
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use patina_core::api::{ApprovalAnswer, ApprovalView, NewRun, RunView};
 use patina_core::budget::Budgets;
 use patina_store::{Db, approvals, runs as store};
@@ -144,7 +144,12 @@ pub async fn run_events(
     let after = q.after.or_else(|| headers.get("last-event-id").and_then(|v| v.to_str().ok()).and_then(|v| v.parse().ok())).unwrap_or(0);
     // Subscribe before reading the log: anything appended meanwhile arrives on the channel and is de-duplicated by seq.
     let rx = st.runs.lock().unwrap().get(&id).map(|h| h.tx.subscribe());
-    let stream = follow(st.db.clone(), id, after, rx);
+    let stream = follow(st.db.clone(), id, after, rx).map(|item| {
+        Ok(match item {
+            Live::Event(ev) => sse_event(&ev),
+            Live::Delta { agent_id, text, .. } => SseEvent::default().event("delta").data(json!({"agent_id": agent_id, "text": text}).to_string()),
+        })
+    });
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("hb")))
 }
 
@@ -157,13 +162,15 @@ struct Follow {
     replayed: bool,
 }
 
-fn follow(db: Db, run_id: String, after: i64, rx: Option<broadcast::Receiver<Live>>) -> impl Stream<Item = Result<SseEvent, Infallible>> {
+/// A run's events after `after`: first from the log, then live from `rx`, in order, with no gap and no duplicate.
+/// Ends once the log is drained and the run is no longer active (`rx` is `None` or closed).
+pub fn follow(db: Db, run_id: String, after: i64, rx: Option<broadcast::Receiver<Live>>) -> impl Stream<Item = Live> {
     let st = Follow { db, run_id, last: after, rx, backlog: Default::default(), replayed: false };
     futures::stream::unfold(st, |mut f| async move {
         loop {
             if let Some(ev) = f.backlog.pop_front() {
                 f.last = ev.seq;
-                return Some((Ok(sse_event(&ev)), f));
+                return Some((Live::Event(ev), f));
             }
             if !f.replayed {
                 // Read the log in pages until it is drained.
@@ -190,8 +197,7 @@ fn follow(db: Db, run_id: String, after: i64, rx: Option<broadcast::Receiver<Liv
                 Ok(Live::Delta { agent_id, text, after_seq }) => {
                     // A delta older than what this client has seen is already inside a persisted text event.
                     if after_seq >= f.last {
-                        let data = json!({"agent_id": agent_id, "text": text}).to_string();
-                        return Some((Ok(SseEvent::default().event("delta").data(data)), f));
+                        return Some((Live::Delta { agent_id, text, after_seq }, f));
                     }
                 }
                 // Fell behind the channel: catch up from the log, which holds everything.

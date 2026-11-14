@@ -3,6 +3,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use patina_core::{Config, Paths};
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
+use std::process::ExitCode;
+
+mod run;
 
 #[derive(Parser)]
 #[command(name = "patina", version, about = "Self-hosted agent workbench")]
@@ -32,6 +35,34 @@ enum Command {
         #[arg(long, value_enum, default_value = "human")]
         log_format: LogFormat,
     },
+    /// Run one agent on a project from the terminal, printing its events and asking for approvals here
+    Run {
+        /// The project folder: the top level of a git repository
+        #[arg(long)]
+        project: PathBuf,
+        /// The agent to run (teams of several agents arrive in a later version)
+        #[arg(long, alias = "agent")]
+        team: String,
+        /// Skip approvals. Accepted only when a sandbox is active
+        #[arg(long)]
+        yes: bool,
+        /// Print each event as a line of JSON instead of readable text
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        max_steps: Option<u32>,
+        #[arg(long)]
+        max_tokens: Option<u64>,
+        #[arg(long)]
+        max_cost_usd: Option<f64>,
+        #[arg(long)]
+        max_wall_clock_s: Option<u64>,
+        #[arg(long)]
+        config_dir: Option<PathBuf>,
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+        prompt: String,
+    },
     /// Forget the owner password and print a new one-time setup token
     ResetPassword {
         #[arg(long)]
@@ -53,11 +84,30 @@ fn init_logging(format: LogFormat) {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<ExitCode> {
     match Cli::parse().command {
+        Command::Run {
+            project,
+            team,
+            yes,
+            json,
+            max_steps,
+            max_tokens,
+            max_cost_usd,
+            max_wall_clock_s,
+            config_dir,
+            data_dir,
+            prompt,
+        } => {
+            // Logs go to stderr and only warnings, so stdout carries nothing but the run.
+            let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
+            tracing_subscriber::fmt().with_env_filter(filter).with_writer(std::io::stderr).init();
+            let paths = open_paths(config_dir, data_dir)?;
+            let args = run::RunArgs { project, team, prompt, yes, json, max_steps, max_tokens, max_cost_usd, max_wall_clock_s };
+            return Ok(ExitCode::from(run::run(paths, args).await?));
+        }
         Command::Version => {
             println!("patina {}", env!("CARGO_PKG_VERSION"));
-            Ok(())
         }
         Command::ResetPassword { config_dir, data_dir } => {
             let paths = open_paths(config_dir, data_dir)?;
@@ -65,7 +115,6 @@ async fn main() -> Result<()> {
             let token = patina_server::reset_password(&db).await?;
             println!("Password cleared and all sessions signed out.\nSetup token: {token}");
             println!("If the daemon is running, open it in a browser and enter this token to set a new password.");
-            Ok(())
         }
         Command::Serve {
             bind,
@@ -75,9 +124,10 @@ async fn main() -> Result<()> {
             log_format,
         } => {
             init_logging(log_format);
-            serve(bind, port, config_dir, data_dir).await
+            serve(bind, port, config_dir, data_dir).await?;
         }
     }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn open_paths(config_dir: Option<PathBuf>, data_dir: Option<PathBuf>) -> Result<Paths> {

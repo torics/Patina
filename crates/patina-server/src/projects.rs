@@ -31,6 +31,11 @@ fn slug(s: &str) -> String {
 }
 
 pub async fn create(State(st): St, Json(input): Json<NewProject>) -> ApiResult<Json<ProjectConfig>> {
+    Ok(Json(register(&st, input).await?))
+}
+
+/// Validate a folder and add it to `projects.toml`. Also used by the headless `patina run`.
+pub async fn register(st: &AppState, input: NewProject) -> ApiResult<ProjectConfig> {
     let path = std::path::PathBuf::from(input.path.trim());
     if !path.is_absolute() {
         return Err(ApiError::bad_request("give the folder as an absolute path"));
@@ -66,7 +71,7 @@ pub async fn create(State(st): St, Json(input): Json<NewProject>) -> ApiResult<J
     let project = ProjectConfig { id, name, path: path.to_string_lossy().to_string(), policy: input.policy.unwrap_or_default() };
     file.projects.push(project.clone());
     st.save_projects(&file)?;
-    Ok(Json(project))
+    Ok(project)
 }
 
 /// Change a project's name or policy. The folder of a project does not change; register a new one instead.
