@@ -40,11 +40,12 @@ Rules that hold for every backend:
 - **Your home folder and Patina's own folders are out of reach.** A sandboxed command cannot read `~/.ssh`, your shell history, cloud credentials, Patina's database, its master key or its config. A `sandbox_read` or `sandbox_write` folder that overlaps Patina's folders is refused.
 - **The environment is an allowlist.** A command gets `PATH`, `LANG`, `TERM`, a private `HOME` and `TMPDIR`, and the project's `env`. Nothing else of the daemon's environment is passed on, so no key in an environment variable leaks. Never put a secret in a project's `env`: the agent can read it.
 - **A command cannot outlive its limits.** Each command runs in its own process group. On a timeout, a stop, or the end of the run, the group gets `SIGTERM`, two seconds, then `SIGKILL`. Processes that left the group are found by a marker in their environment and killed too. Background processes end with the run.
+- **Resource caps where the host can enforce them.** With a delegated cgroup (a systemd unit with `Delegate=yes`), each command gets a cgroup of its own with the project's memory, process and CPU caps, and is killed as a whole cgroup, which also reaches a process that left the group and cleared its marker. The container backend applies the same caps to the run's container. Every command gets a per-file size cap (`RLIMIT_FSIZE`). `RLIMIT_AS` and `RLIMIT_NPROC` are not used: the first breaks runtimes that reserve address space, the second counts all of your processes.
 
 ### What Landlock does not do
 
 - **Network.** With `network = false`, TCP connections are blocked where the kernel supports it (Landlock ABI 4, Linux 6.7). UDP is never blocked, so this is not network isolation. On an older kernel, a project with `network = false` is refused under Landlock; use the container backend. With the network on, which is the default, a command can reach the internet, your local network and services on `localhost`.
-- **Resource limits.** None are enforced: no memory, CPU or process-count cap. A command can slow the machine until its timeout. `patina doctor` says so.
+- **Resource limits.** Landlock caps nothing. Without a delegated cgroup there is no memory, CPU or process-count cap, only the file size cap, and a command can slow the machine until its timeout. `patina doctor` and the sandbox badge say which caps hold.
 - **Signals.** Before Landlock ABI 6 a command can signal your other processes.
 - **Reading system information.** A command can read `/proc` and `/sys`, including the names and command lines of your other processes. It cannot read their memory or environment.
 - **Running as root.** Patina drops all Linux capabilities in the sandbox, so a daemon run as root is contained the same way. Do not run Patina as root anyway.
@@ -133,7 +134,6 @@ This protects backups and copied database files. It does not protect against a c
 
 ## Not in place yet
 
-- Resource limits for commands (cgroup v2), planned for the hardening milestone.
 - Process-tree termination on Windows (job objects). The container backend is the only sandbox there.
 - OAuth sign-in for remote MCP servers. A server that needs it can be used only with a token in a header.
 

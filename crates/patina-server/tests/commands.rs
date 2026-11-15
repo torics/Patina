@@ -14,12 +14,16 @@ async fn events_of(d: &Daemon, run: &str) -> Vec<Value> {
 #[tokio::test]
 async fn a_command_asks_first_without_a_sandbox_and_its_pattern_joins_the_allowlist() {
     let scripts = vec![
-        Script::tool_calls(&[("c1", "run_command", json!({"command": "echo hello"}))]),
+        Script::tool_calls(&[("c1", "run_command", json!({"command": "echo hello; cat key.txt"}))]),
         Script::tool_calls(&[("c2", "write_file", json!({"path": "b.txt", "content": "x\n"}))]),
         Script::tool_calls(&[("c3", "run_command", json!({"command": "echo again"}))]),
         Script::text("Done."),
     ];
-    let (d, _repo) = workbench(scripts, &TOOLS).await;
+    let (d, repo) = workbench(scripts, &TOOLS).await;
+    // A configured secret that a project also holds in a file never reaches the log or the model.
+    d.state.secrets.put("p1", "sk-config-secret-4242").await.unwrap();
+    std::fs::write(repo.join("key.txt"), "key=sk-config-secret-4242\n").unwrap();
+    patina_tools::git::commit_all(&repo, "key").await.unwrap().unwrap();
     // The project asks for auto_edit, but with no sandbox every edit and command is confirmed.
     let (s, p) = d
         .send(reqwest::Method::PATCH, "/projects/site", json!({"policy": "auto_edit"}))
@@ -70,7 +74,12 @@ async fn a_command_asks_first_without_a_sandbox_and_its_pattern_joins_the_allowl
         .filter(|e| e["type"] == "tool_result" && e["payload"]["name"] == "run_command")
         .map(|e| e["payload"]["content"].as_str().unwrap())
         .collect();
-    assert_eq!(results, ["exit code 0\nhello", "exit code 0\nagain"]);
+    assert_eq!(
+        results,
+        ["exit code 0\nhello\nkey=[secret removed by Patina]", "exit code 0\nagain"]
+    );
+    let sent = format!("{:?}", d.mock.requests());
+    assert!(sent.contains("[secret removed by Patina]") && !sent.contains("sk-config-secret-4242"));
     // The same pattern is stored once.
     let projects = get_json(&d, "/projects").await;
     assert_eq!(projects[0]["allow_commands"], json!(["echo *"]));
@@ -104,6 +113,7 @@ async fn project_settings_are_checked_before_they_are_saved() {
         (json!({"path": "/somewhere/else"}), 400, "not a project setting that can be changed"),
         (json!({"network": "yes"}), 400, "invalid project settings"),
         (json!({"name": " "}), 400, "needs a name"),
+        (json!({"limits": {"memory_mb": 10}}), 400, "memory_mb"),
     ] {
         let (s, b) = patch(body.clone()).await;
         assert_eq!(s, code, "{body}: {b}");
@@ -172,8 +182,9 @@ async fn the_system_page_reports_the_sandbox_and_the_command_tool() {
     let sys = get_json(&d, "/system").await;
     assert_eq!(sys["sandbox"]["level"], "none");
     assert!(
-        sys["sandbox"]["landlock_abi"].is_null() && sys["sandbox"]["resource_limits"].as_array().unwrap().is_empty(),
-        "{sys}"
+        sys["sandbox"]["landlock_abi"].is_null()
+            && sys["sandbox"]["resource_limits"] == json!(["largest file a command may write (RLIMIT_FSIZE)"]),
+        "only the limits that are enforced are listed: {sys}"
     );
     assert!(sys["sandbox"]["summary"].as_str().unwrap().contains("every edit and command asks"));
     assert!(sys["tools"].as_array().unwrap().contains(&json!("run_command")));

@@ -66,6 +66,79 @@ pub enum SandboxError {
     Setup(String),
 }
 
+/// Caps on what one command may use. Zero turns a cap off. The defaults are generous: they stop a runaway
+/// command from taking the whole machine, not a normal build.
+///
+/// Where they are enforced: memory, processes and CPU by cgroup v2 when the daemon has a delegated cgroup, or
+/// by the container backend for the run's container as a whole; file size by `RLIMIT_FSIZE` on every command
+/// on Unix, and by the container backend. Nothing else enforces them, and nothing claims they are enforced
+/// when they are not.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, TS)]
+#[ts(export)]
+pub struct ResourceLimits {
+    /// Memory in MiB.
+    #[serde(default = "default_memory_mb")]
+    pub memory_mb: u64,
+    /// Processes and threads.
+    #[serde(default = "default_processes")]
+    pub processes: u64,
+    /// CPU cores, such as 1.5. Zero is no cap.
+    #[serde(default)]
+    pub cpus: f64,
+    /// The largest file a command may write, in MiB. This does not cap total disk use.
+    #[serde(default = "default_file_size_mb")]
+    pub file_size_mb: u64,
+}
+
+fn default_memory_mb() -> u64 {
+    8192
+}
+fn default_processes() -> u64 {
+    2048
+}
+fn default_file_size_mb() -> u64 {
+    8192
+}
+
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        ResourceLimits {
+            memory_mb: default_memory_mb(),
+            processes: default_processes(),
+            cpus: 0.0,
+            file_size_mb: default_file_size_mb(),
+        }
+    }
+}
+
+impl ResourceLimits {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.memory_mb != 0 && self.memory_mb < 64 {
+            return Err("limits.memory_mb must be 0 (no cap) or at least 64".into());
+        }
+        if self.processes != 0 && self.processes < 16 {
+            return Err("limits.processes must be 0 (no cap) or at least 16".into());
+        }
+        if !self.cpus.is_finite() || self.cpus < 0.0 || (self.cpus > 0.0 && self.cpus < 0.01) || self.cpus > 1024.0 {
+            return Err("limits.cpus must be 0 (no cap) or between 0.01 and 1024".into());
+        }
+        if self.file_size_mb > 1 << 40 {
+            return Err("limits.file_size_mb is too large".into());
+        }
+        Ok(())
+    }
+
+    /// The memory cap in bytes, if any.
+    pub fn memory_bytes(&self) -> Option<u64> {
+        (self.memory_mb > 0).then(|| self.memory_mb.saturating_mul(1024 * 1024))
+    }
+
+    /// The file size cap in bytes, if any.
+    pub fn file_size_bytes(&self) -> Option<u64> {
+        (self.file_size_mb > 0).then(|| self.file_size_mb.saturating_mul(1024 * 1024))
+    }
+}
+
 /// An operating-system command, ready to spawn with exactly this environment.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Prepared {
@@ -74,6 +147,9 @@ pub struct Prepared {
     /// The complete environment. The spawner clears everything else.
     pub env: Vec<(String, String)>,
     pub cwd: Option<PathBuf>,
+    /// Limits the spawner applies to this one command. `None` when something else enforces them, such as the
+    /// run's container.
+    pub limits: Option<ResourceLimits>,
 }
 
 #[async_trait]

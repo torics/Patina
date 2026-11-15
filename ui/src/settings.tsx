@@ -8,6 +8,7 @@ import type { McpValueView } from "./api/generated/McpValueView";
 import type { PolicyMode } from "./api/generated/PolicyMode";
 import type { PresetView } from "./api/generated/PresetView";
 import type { ProjectView } from "./api/generated/ProjectView";
+import type { ResourceLimits } from "./api/generated/ResourceLimits";
 import type { SandboxChoice } from "./api/generated/SandboxChoice";
 import type { ProviderKind } from "./api/generated/ProviderKind";
 import type { ProviderTestResult } from "./api/generated/ProviderTestResult";
@@ -338,7 +339,7 @@ function SandboxCard() {
         <li>Landlock file confinement: {s.landlock_abi === null ? "not available" : `available (ABI ${s.landlock_abi}${s.landlock_abi >= 6 ? " or later" : ""})`}</li>
         <li>Blocking TCP for a project without network: {s.tcp_block ? "available. UDP is never blocked, so this is not full network isolation" : "not available under Landlock on this kernel"}</li>
         <li>Container runtime: {s.container_runtime ?? "none found"}</li>
-        <li>Memory, CPU and process limits: {s.resource_limits.length ? s.resource_limits.join(", ") : "none enforced"}</li>
+        <li>Resource limits enforced here: {s.resource_limits.length ? s.resource_limits.join("; ") : "none"}</li>
       </ul>
       <p class="muted">
         Run history: {retentionDays.value === 0 ? "kept until you delete it." : `the logs of runs that ended more than ${retentionDays.value} days ago are removed. Their changes and checkpoints stay.`} Set{" "}
@@ -421,6 +422,12 @@ function ProjectSettings({ p, saved, setSaved }: { p: ProjectView; saved: boolea
   const [secrets, setSecrets] = useState<string[]>(p.worktree_copy_secrets);
   const [setup, setSetup] = useState(p.worktree_setup ?? "");
   const [dev, setDev] = useState(p.dev_command ?? "");
+  const [limits, setLimits] = useState(p.limits);
+  const limit = (key: keyof ResourceLimits) => (e: { currentTarget: { value: string } }) => {
+    const n = Number(e.currentTarget.value);
+    setLimits({ ...limits, [key]: Number.isFinite(n) && n > 0 ? n : 0 });
+    setSaved(false);
+  };
   const [error, setError] = useState<string | null>(null);
   const risky = lines(copy).filter(looksLikeCredentials);
   const input = (set: (v: string) => void) => (e: { currentTarget: { value: string } }) => (set(e.currentTarget.value), setSaved(false));
@@ -443,6 +450,7 @@ function ProjectSettings({ p, saved, setSaved }: { p: ProjectView; saved: boolea
         worktree_copy_secrets: secrets.filter((s) => copied.includes(s)),
         worktree_setup: setup.trim() || null,
         dev_command: dev.trim() || null,
+        limits,
       });
       await refresh();
       setSaved(true);
@@ -515,6 +523,33 @@ function ProjectSettings({ p, saved, setSaved }: { p: ProjectView; saved: boolea
           Dev server command for Preview, run in a run's copy inside the sandbox. <code>{"{port}"}</code> becomes the run's port, which is also in <code>PORT</code>.
           <input name="dev_command" value={dev} onInput={input(setDev)} placeholder="npm run dev -- --host 127.0.0.1 --port {port} --strictPort" />
         </label>
+        <fieldset>
+          <legend>Limits for each command (0 is no limit)</legend>
+          <p class="muted">
+            {sandbox.value?.resource_limits.some((l) => l.includes("cgroup"))
+              ? "Memory, processes and CPU are capped per command on this machine."
+              : "On this machine memory, processes and CPU are capped only for a project on the container backend, where the limits hold for the run's container as a whole."}{" "}
+            The file size cap applies to every command.
+          </p>
+          <div class="limits">
+            <label>
+              Memory (MiB)
+              <input name="memory_mb" type="number" min="0" value={limits.memory_mb} onInput={limit("memory_mb")} />
+            </label>
+            <label>
+              Processes
+              <input name="processes" type="number" min="0" value={limits.processes} onInput={limit("processes")} />
+            </label>
+            <label>
+              CPU cores
+              <input name="cpus" type="number" min="0" step="0.1" value={limits.cpus} onInput={limit("cpus")} />
+            </label>
+            <label>
+              Largest file (MiB)
+              <input name="file_size_mb" type="number" min="0" value={limits.file_size_mb} onInput={limit("file_size_mb")} />
+            </label>
+          </div>
+        </fieldset>
         {error && <p class="error">{error}</p>}
         <div class="row">
           <button type="submit">Save settings</button>

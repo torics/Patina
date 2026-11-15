@@ -27,6 +27,11 @@ jobs:
       - name: Image for the container sandbox test
         run: docker pull alpine:3
       - run: cargo test --all
+      # The runner's own cgroup is not delegated, so the cgroup test runs as a scope of its own that is, as root.
+      - name: Command cgroups, in a cgroup delegated to the test alone
+        run: |
+          bin=$(cargo test -p patina-tools --test limits --no-run --message-format=json | jq -r 'select(.target.name == "limits" and .executable != null) | .executable')
+          sudo env PATINA_TEST_CGROUP=1 PATH="$PATH" systemd-run --scope -p Delegate=yes --quiet -- "$bin" --exact commands_get_a_cgroup_of_their_own_that_holds_their_limits --nocapture
       - run: cargo build --release
       - name: What this host supports
         run: ./target/release/patina doctor --config-dir "$RUNNER_TEMP/patina-config" --data-dir "$RUNNER_TEMP/patina-data"

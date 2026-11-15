@@ -234,6 +234,9 @@ impl RunHost for Host {
         ids.dedup();
         Ok(ids)
     }
+    fn redact(&self, text: &str) -> String {
+        text.to_string()
+    }
 }
 
 fn env(host: &Host) -> RunEnv<'_> {

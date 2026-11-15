@@ -225,6 +225,18 @@ async fn run_command(command: Command) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// Give each command a cgroup of its own where the daemon's cgroup is delegated, before anything is started.
+pub(crate) fn limit_commands() {
+    match patina_tools::cgroup::init() {
+        Ok(tree) => tracing::info!(
+            cgroup = %tree.own().display(),
+            "commands get cgroup v2 limits on {}",
+            patina_tools::cgroup::describe(tree.controllers())
+        ),
+        Err(why) => tracing::info!("no cgroup v2 limits for commands: {why}"),
+    }
+}
+
 fn open_paths(config_dir: Option<PathBuf>, data_dir: Option<PathBuf>) -> Result<Paths> {
     let paths = Paths::resolve(config_dir.as_deref(), data_dir.as_deref())
         .context("cannot determine config and data folders; pass --config-dir and --data-dir")?;
@@ -264,6 +276,7 @@ async fn serve(
         }
     }
     let setup_token = patina_server::ensure_setup_token(&db).await?;
+    limit_commands();
     let state = patina_server::state::AppState::new(paths, cfg, db, secrets, patina_server::genai_factory());
     let listener = patina_server::bind(addr).await.with_context(|| format!("cannot bind {addr}"))?;
     println!("Patina is running at http://{}", listener.local_addr()?);

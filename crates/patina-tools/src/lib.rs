@@ -1,4 +1,5 @@
 //! Built-in tools, path confinement and git operations.
+pub mod cgroup;
 pub mod command;
 pub mod confine;
 pub mod files;

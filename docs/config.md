@@ -101,6 +101,16 @@ Only what differs from the defaults is written to the file. Everything below is 
 | `worktree_setup` | none | A command to run in each new worktree before the agent starts, inside the sandbox, with a ten-minute limit. If it fails, the run fails |
 | `dev_command` | none | The dev server for Preview, started from the Preview tab in the run's worktree, inside the sandbox. `{port}` becomes the run's port, which is also in `PORT`. Many dev servers need it named: Vite takes `--port {port} --strictPort`. Under the container backend the server must listen on `0.0.0.0` |
 
+| `limits` | see below | Caps for each command, as `limits = { memory_mb = 4096, processes = 512, cpus = 2, file_size_mb = 2048 }`. A key left out keeps its default; `0` turns a cap off |
+
+`limits` holds `memory_mb` (default 8192), `processes` (default 2048, threads count too), `cpus` (default 0, no cap) and `file_size_mb` (default 8192, the largest single file a command may write; it does not cap total disk use). Where they are enforced:
+
+- **cgroup v2**, when the daemon runs in a cgroup delegated to it, such as a systemd unit with `Delegate=yes` (see `docs/systemd.md`). Each command gets its own cgroup with `memory.max`, `pids.max` and `cpu.max`, and stopping a command kills its whole cgroup. Swap is capped at zero, so a command that runs out of memory is stopped instead of paging.
+- **The container backend** passes them to the runtime (`--memory`, `--pids-limit`, `--cpus`, `--ulimit fsize`). They cap the run's container, so all of its commands share them. A rootless runtime needs the controllers delegated to your user; if it cannot apply a limit, the container does not start and the error says why. Set that limit to `0` to go on without it.
+- **The file size cap** is set with `RLIMIT_FSIZE` on every command on Linux and macOS.
+
+Nothing else caps memory, processes or CPU. `patina doctor` and Settings, Sandbox list what this machine enforces.
+
 Without a sandbox, every edit and command asks whatever `policy` says. The file is read on every use, so a hand edit applies to the next run. "Approve and always allow" in the UI appends to `allow_commands`.
 
 ### What a command gets

@@ -119,11 +119,13 @@ async fn view(st: &AppState) -> ApiResult<PreviewView> {
         .and_then(|p| p.dev_command)
         .zip(port)
         .map(|(c, p)| c.replace("{port}", &p.to_string()));
+    let secrets = st.redactor().await;
     let mut dev = st.preview.dev.lock().await;
     let (running, output) = match dev.as_mut().filter(|d| d.run_id == run_id) {
         Some(d) => {
             let alive = matches!(d.running.child.try_wait(), Ok(None));
             let (text, _) = d.running.output();
+            let text = secrets.redact(&text).into_owned();
             // The last part is what the owner needs: the address it listens on, or why it stopped.
             let tail: String = text.chars().rev().take(4000).collect::<Vec<_>>().into_iter().rev().collect();
             (alive, tail)

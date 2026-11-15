@@ -114,6 +114,36 @@ impl AppState {
         self.paths.data_dir.join("sandbox").join(run_id)
     }
 
+    /// Every configured secret value: what the secret store holds, and the variables that providers and MCP
+    /// servers take from the daemon's environment. Read fresh, so a key added a moment ago is covered.
+    pub async fn redactor(&self) -> patina_core::redact::Redactor {
+        let mut values = self.secrets.values().await.unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "could not read the secret store to remove secrets from output");
+            vec![]
+        });
+        let mut vars: Vec<String> = vec![];
+        if let Ok(f) = self.providers() {
+            vars.extend(
+                f.providers
+                    .iter()
+                    .filter_map(|p| p.api_key_ref.as_deref()?.strip_prefix("env:").map(String::from)),
+            );
+        }
+        if let Ok(f) = self.mcp_file() {
+            for server in &f.servers {
+                vars.extend(
+                    server
+                        .env
+                        .values()
+                        .chain(server.headers.values())
+                        .filter_map(|v| v.strip_prefix("env:").map(String::from)),
+                );
+            }
+        }
+        values.extend(vars.iter().filter_map(|v| std::env::var(v).ok()));
+        patina_core::redact::Redactor::new(values)
+    }
+
     fn providers_path(&self) -> PathBuf {
         self.paths.config_dir.join("providers.toml")
     }

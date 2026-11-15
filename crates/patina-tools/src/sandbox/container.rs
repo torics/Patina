@@ -3,7 +3,7 @@
 use super::Setup;
 use crate::process::MARKER_VAR;
 use async_trait::async_trait;
-use patina_core::sandbox::{Prepared, Sandbox, SandboxError, SandboxLevel};
+use patina_core::sandbox::{Prepared, ResourceLimits, Sandbox, SandboxError, SandboxLevel};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
@@ -130,6 +130,7 @@ impl ContainerSandbox {
             "--security-opt".to_string(),
             "no-new-privileges".to_string(),
         ]);
+        args.extend(limit_args(&self.setup.limits));
         if !self.setup.network {
             args.extend(["--network".to_string(), "none".to_string()]);
         } else if let Some(port) = self.setup.port {
@@ -227,6 +228,8 @@ impl Sandbox for ContainerSandbox {
             args,
             env: client_env(),
             cwd: None,
+            // The container holds the limits for all of the run's commands together.
+            limits: None,
         })
     }
 
@@ -262,6 +265,30 @@ impl Sandbox for ContainerSandbox {
     }
 }
 
+/// The runtime's flags for the project's limits. They cap the run's container, so all of its commands share them.
+/// Swap is capped with memory, so a command that runs out is stopped instead of paging the host to a halt.
+fn limit_args(limits: &ResourceLimits) -> Vec<String> {
+    let mut args = vec![];
+    if let Some(bytes) = limits.memory_bytes() {
+        args.extend([
+            "--memory".to_string(),
+            bytes.to_string(),
+            "--memory-swap".to_string(),
+            bytes.to_string(),
+        ]);
+    }
+    if limits.processes > 0 {
+        args.extend(["--pids-limit".to_string(), limits.processes.to_string()]);
+    }
+    if limits.cpus > 0.0 {
+        args.extend(["--cpus".to_string(), format!("{}", limits.cpus)]);
+    }
+    if let Some(bytes) = limits.file_size_bytes() {
+        args.extend(["--ulimit".to_string(), format!("fsize={bytes}:{bytes}")]);
+    }
+    args
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,6 +322,45 @@ mod tests {
             args.windows(2).any(|w| w == ["--cap-drop", "ALL"]) && args.windows(2).any(|w| w == ["--security-opt", "no-new-privileges"])
         );
         assert!(!sandbox(true).run_args().iter().any(|a| a == "--network"));
+    }
+
+    #[test]
+    fn the_projects_limits_cap_the_container_and_zero_leaves_a_cap_off() {
+        let mut s = sandbox(true);
+        s.setup.limits = ResourceLimits {
+            memory_mb: 512,
+            processes: 100,
+            cpus: 1.5,
+            file_size_mb: 1,
+        };
+        let args = s.run_args();
+        for pair in [
+            ["--memory", "536870912"],
+            ["--memory-swap", "536870912"],
+            ["--pids-limit", "100"],
+            ["--cpus", "1.5"],
+            ["--ulimit", "fsize=1048576:1048576"],
+        ] {
+            assert!(args.windows(2).any(|w| w == pair), "{pair:?} in {args:?}");
+        }
+        s.setup.limits = ResourceLimits {
+            memory_mb: 0,
+            processes: 0,
+            cpus: 0.0,
+            file_size_mb: 0,
+        };
+        let args = s.run_args();
+        assert!(
+            !args
+                .iter()
+                .any(|a| ["--memory", "--pids-limit", "--cpus", "--ulimit"].contains(&a.as_str())),
+            "{args:?}"
+        );
+        assert_eq!(
+            s.prepare("true", "m1").unwrap().limits,
+            None,
+            "the container enforces them, not the spawner"
+        );
     }
 
     #[test]
