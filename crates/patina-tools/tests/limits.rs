@@ -133,14 +133,20 @@ async fn commands_get_a_cgroup_of_their_own_that_holds_their_limits() {
         !alive(&pid),
         "a process that left the group and cleared the marker outlived its command"
     );
+    // A cgroup folder always holds its interface files; a command's cgroup is a folder inside it.
+    let left = || -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(tree.commands())
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect()
+    };
     for _ in 0..50 {
-        if std::fs::read_dir(tree.commands()).unwrap().next().is_none() {
+        if left().is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert!(
-        std::fs::read_dir(tree.commands()).unwrap().next().is_none(),
-        "a command's cgroup was left"
-    );
+    assert!(left().is_empty(), "a command's cgroup was left: {:?}", left());
 }
