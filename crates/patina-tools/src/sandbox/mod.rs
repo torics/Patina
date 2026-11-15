@@ -101,11 +101,25 @@ impl Caps {
             (SandboxLevel::Landlock, Some(a)) => format!(
                 "Landlock (ABI {a}{}): commands can write only to the run's worktree and its own home and temp folders, and cannot read your home folder or Patina's data. {}{}",
                 if a >= 6 { " or later" } else { "" },
-                if tcp_block { "TCP can be blocked per project; UDP cannot. " } else { "Network access cannot be restricted. " },
-                if a >= 6 { "Commands cannot signal processes outside the sandbox." } else { "Commands can still signal your other processes (that needs ABI 6)." },
+                if tcp_block {
+                    "TCP can be blocked per project; UDP cannot. "
+                } else {
+                    "Network access cannot be restricted. "
+                },
+                if a >= 6 {
+                    "Commands cannot signal processes outside the sandbox."
+                } else {
+                    "Commands can still signal your other processes (that needs ABI 6)."
+                },
             ),
-            _ if runtime.is_some() => "No Landlock on this host. A project with a container_image runs its commands in a container; any other project asks before every edit and command.".to_string(),
-            _ => "No sandbox is available on this host, so every edit and command asks for approval.".to_string(),
+            _ if runtime.is_some() => format!(
+                "{}A project with a container_image runs its commands in a container; any other project asks before every edit and command.",
+                no_landlock()
+            ),
+            _ => format!(
+                "{}No sandbox is available on this host, so every edit and command asks for approval.",
+                no_landlock()
+            ),
         };
         SandboxStatus {
             level,
@@ -141,6 +155,15 @@ fn landlock_abi() -> Option<u32> {
 #[cfg(not(target_os = "linux"))]
 fn landlock_abi() -> Option<u32> {
     None
+}
+
+/// Why there is no Landlock here, in words that name the real reason.
+pub fn no_landlock() -> &'static str {
+    if cfg!(target_os = "linux") {
+        "No Landlock on this host. "
+    } else {
+        "The Linux sandbox (Landlock) and cgroup limits are not available on this operating system. "
+    }
 }
 
 /// Whether `a` contains `b`, is `b`, or sits inside `b`.
