@@ -38,7 +38,8 @@ async fn smoke(label: &str, kind: ProviderKind, base_url: Option<String>, key: O
         messages: vec![Message::user("Reply with one short sentence about rust on iron.")],
         tools: vec![],
         temperature: None,
-        max_output_tokens: Some(100),
+        // Reasoning models spend part of this on thinking before any text, so 100 can leave no answer at all.
+        max_output_tokens: Some(2000),
         reasoning: None,
     };
     let mut s = provider.stream(req, CancellationToken::new()).await.unwrap();

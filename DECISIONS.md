@@ -136,6 +136,7 @@
 - **Import and export** use one TOML file: `[team]` plus one `[[agent]]` per agent the team can reach, delegation included. It names providers by id and holds no secret. Import checks everything before writing anything; a team or agent that exists with other settings is a 409 unless `overwrite`; identical ones are left alone. Agents whose provider is missing can be given another with `provider`.
 - **An agent in a team cannot be deleted** (409 `in_use`) until the team stops naming it.
 - **`patina run --team <id>`** runs a team, or the agent with that id when there is no such team. Other agents' text and tool lines are labeled with their id.
+- **An empty final answer is flagged.** The live check showed a reasoning model spending a small output limit on thinking and ending the turn with no text, reported as a normal stop. The loop now logs an error that suggests raising `max_output_tokens`; the run still completes. The live smoke test asks for up to 2000 tokens instead of 100 for the same reason.
 - **UI (kept minimal, per the guardrail):** a Teams section in Settings (from a template, by hand, import, export, delete), a role and delegation targets on the agent form, a team or agent picker in the composer, and sub-agent blocks nested under the `delegate` call that started them.
 
 ## M5 dependencies (stripped release binary: 11.2 MB, up from 10.9 MB; idle memory 10.3 MB; UI 25.4 KB gzipped)
@@ -143,7 +144,7 @@
 
 ## Open risks
 - rustls uses aws-lc-rs, which needs a C toolchain when cross-compiling. Check static musl builds early in M8, and switch to the ring provider if needed.
-- Live checks: Gemini passed (streaming, a tool call, reasoning replay) on 2026-11-15. Anthropic, OpenAI and a local OpenAI-compatible endpoint have not been checked live yet.
+- Live checks passed on 2026-11-15 for Gemini (streaming, a tool call, reasoning replay) and for a hosted OpenAI-compatible endpoint (Meta's Muse API: streaming and a tool call). Anthropic, OpenAI and a local endpoint have not been checked live yet.
 - Commands have no memory, CPU or process-count limit until M8. A command can slow the machine until its timeout.
 - Under Landlock a command can read `/proc` (names and command lines of other processes), can use UDP even with `network = false`, and before ABI 6 can signal other processes.
 - While a background command swaps folders for links, `list_files` and `search` can list file names outside the worktree, never content.

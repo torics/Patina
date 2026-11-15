@@ -312,4 +312,15 @@ describe("event reducer", () => {
     expect(delegated(t, "lead", "d1")).toHaveLength(1);
     expect((delegated(t, "lead", "d1")[0].items[0] as ToolItem).state).toBe("done");
   });
+
+  it("shows the warning about an empty final answer on the agent's block", () => {
+    seq = 0;
+    const t = build([
+      ev("run_started", {}, null),
+      ev("agent_started", { name: "A" }),
+      ev("error", { message: "The model ended its turn without an answer.", retrying: false, empty_answer: true }),
+      ev("agent_finished", { status: "completed" }),
+    ]);
+    expect(t.blocks[0].errors).toEqual([{ message: "The model ended its turn without an answer.", retrying: false }]);
+  });
 });

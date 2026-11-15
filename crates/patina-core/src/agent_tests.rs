@@ -1156,3 +1156,21 @@ async fn a_long_run_stays_inside_the_context_window() {
     assert!(host.of("error").is_empty());
     assert_eq!(as_json(&host.saved.lock().unwrap()), as_json(&h[1..]));
 }
+
+#[tokio::test(start_paused = true)]
+async fn an_empty_final_answer_is_flagged_so_the_owner_can_raise_the_output_limit() {
+    let host = Host::default();
+    let empty = vec![Ok(StreamEvent::Stop(StopReason::EndTurn))];
+    let (out, h) = run(&ctx(Scripted::new(vec![empty]), &host, vec![])).await;
+    assert_eq!(out, Outcome::Completed);
+    assert_eq!(h.len(), 2);
+    let errors = host.of("error");
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0]["message"].as_str().unwrap().contains("max_output_tokens"), "{errors:?}");
+    assert_eq!(errors[0]["empty_answer"], true);
+
+    // An answer with text is not flagged.
+    let host = Host::default();
+    run(&ctx(Scripted::new(vec![text("Done.")]), &host, vec![])).await;
+    assert!(host.of("error").is_empty());
+}

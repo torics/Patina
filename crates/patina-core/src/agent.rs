@@ -702,6 +702,7 @@ async fn steps(spec: &AgentSpec, ctx: &RunCtx<'_>, history: &mut Vec<Message>, r
                 }
 
                 // -- The assistant message: reasoning blocks first (replayed verbatim), then text, then tool calls.
+                let silent = turn.text.trim().is_empty();
                 let mut calls = Vec::new();
                 let mut parts: Vec<Part> = turn.reasoning_blocks.into_iter().map(|opaque| Part::Reasoning { opaque }).collect();
                 if !turn.text.is_empty() {
@@ -730,6 +731,17 @@ async fn steps(spec: &AgentSpec, ctx: &RunCtx<'_>, history: &mut Vec<Message>, r
                 )
                 .await?;
                 if calls.is_empty() {
+                    if silent {
+                        // A reasoning model can spend its whole output limit thinking and send nothing back.
+                        ctx.host
+                            .append(
+                                agent,
+                                EventType::Error,
+                                json!({"message": format!("The model ended its turn without an answer. If {} is a reasoning model, \
+                                       raise the agent's max_output_tokens: thinking counts against it.", spec.model), "retrying": false, "empty_answer": true}),
+                            )
+                            .await?;
+                    }
                     // A message the owner sent during this last turn still gets its answer.
                     if deliver(spec, ctx, history).await? {
                         continue;
