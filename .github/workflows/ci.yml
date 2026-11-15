@@ -42,6 +42,29 @@ jobs:
         run: npx playwright install --with-deps chromium && npx playwright test --trace off
         env:
           PATINA_BIN: ${{ github.workspace }}/target/release/patina
+  windows:
+    # Patina on a real Windows host: build the exe, ask doctor what it supports, run the Rust tests and the browser tests against the exe.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: ui/package-lock.json }
+      - run: cargo xtask ui
+      - run: cargo build --release --locked -p patina
+      - name: What this host supports
+        shell: bash
+        run: ./target/release/patina doctor --config-dir "$RUNNER_TEMP/patina-config" --data-dir "$RUNNER_TEMP/patina-data"
+      - run: cargo test --all
+      - name: Browser smoke test against patina.exe
+        working-directory: ui
+        shell: bash
+        run: npx playwright install chromium && npx playwright test --trace off
+        env:
+          PATINA_BIN: ${{ github.workspace }}\target\release\patina.exe
+      - uses: actions/upload-artifact@v4
+        with: { name: patina-windows-x64, path: target/release/patina.exe, if-no-files-found: error }
   supply-chain:
     runs-on: ubuntu-latest
     steps:
