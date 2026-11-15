@@ -91,7 +91,7 @@ test.beforeAll(async () => {
   await call("POST", "/agents", { id: "builder", name: "Builder", provider: "local", model: "m", tools: ["list_files", "read_file", "search", "edit_file", "write_file"] });
   await call("POST", "/projects", { path: repo, policy: "confirm_all" });
   // A dev server for Preview that serves the run's copy of the project.
-  await call("PATCH", "/projects/site", { dev_command: "exec python3 -m http.server {port} --bind 127.0.0.1" });
+  await call("PATCH", "/projects/site", { dev_command: process.platform === "win32" ? "python -m http.server {port} --bind 127.0.0.1" : "exec python3 -m http.server {port} --bind 127.0.0.1" });
 });
 
 test.afterAll(() => {

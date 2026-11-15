@@ -46,6 +46,8 @@ jobs:
     # Patina on a real Windows host: build the exe, ask doctor what it supports, run the Rust tests and the browser tests against the exe.
     runs-on: windows-latest
     steps:
+      # The runner's Git converts line endings on checkout; the tests compare files byte for byte.
+      - run: git config --system core.autocrlf false
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -56,7 +58,9 @@ jobs:
       - name: What this host supports
         shell: bash
         run: ./target/release/patina doctor --config-dir "$RUNNER_TEMP/patina-config" --data-dir "$RUNNER_TEMP/patina-data"
+      # The browser tests run even when a Rust test failed, so one run shows every problem; the job still fails.
       - name: Rust tests
+        id: rust
         shell: bash
         run: cargo test --all --no-fail-fast 2>&1 | tee "$RUNNER_TEMP/rust-tests.txt"
         continue-on-error: true
@@ -76,6 +80,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: patina-windows-x64, path: target/release/patina.exe, if-no-files-found: error }
+      - name: The Rust tests passed
+        if: steps.rust.outcome == 'failure'
+        run: exit 1
   supply-chain:
     runs-on: ubuntu-latest
     steps:

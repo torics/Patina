@@ -232,9 +232,15 @@ impl ProjectsFile {
 mod tests {
     use super::*;
 
+    /// An absolute project path on the platform the tests run on.
+    const SITE: &str = if cfg!(windows) { "C:/srv/site" } else { "/srv/site" };
+
     #[test]
     fn parses_defaults_and_rejects_bad_entries() {
-        let f = ProjectsFile::parse("schema_version = 1\n[[project]]\nid = \"site\"\nname = \"Site\"\npath = \"/srv/site\"\n").unwrap();
+        let f = ProjectsFile::parse(&format!(
+            "schema_version = 1\n[[project]]\nid = \"site\"\nname = \"Site\"\npath = \"{SITE}\"\n"
+        ))
+        .unwrap();
         assert_eq!(f.get("site").unwrap().policy, PolicyMode::AutoEdit);
         assert_eq!(ProjectsFile::parse(&f.to_toml().unwrap()).unwrap(), f);
         assert!(ProjectsFile::parse("schema_version = 1\n[[project]]\nid = \"a\"\nname = \"A\"\npath = \"relative\"\n").is_err());
@@ -244,7 +250,7 @@ mod tests {
 
     fn project(extra: &str) -> Result<ProjectsFile, String> {
         ProjectsFile::parse(&format!(
-            "schema_version = 1\n[[project]]\nid = \"site\"\nname = \"Site\"\npath = \"/srv/site\"\n{extra}"
+            "schema_version = 1\n[[project]]\nid = \"site\"\nname = \"Site\"\npath = \"{SITE}\"\n{extra}"
         ))
     }
 
@@ -258,7 +264,7 @@ mod tests {
             ProjectConfig {
                 id: "site".into(),
                 name: "Site".into(),
-                path: "/srv/site".into(),
+                path: SITE.into(),
                 ..Default::default()
             },
             *p

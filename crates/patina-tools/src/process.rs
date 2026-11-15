@@ -206,11 +206,37 @@ fn start_time(pid: u32) -> Option<String> {
     rest.split_whitespace().nth(19).map(str::to_string)
 }
 
-/// A name for this process that no other process has, now or later: its number and, on Linux, its start time.
+/// When a process started, as a Windows file time, if it is still running. Like the Linux start time, it tells
+/// a process from a later one that got the same number.
+#[cfg(windows)]
+fn start_time(pid: u32) -> Option<String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    // SAFETY: the handle is checked before use and closed once; the out-parameters are plain local structs.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+        let mut code = 0u32;
+        let running = GetExitCodeProcess(handle, &mut code) != 0 && code == STILL_ACTIVE as u32;
+        let zero = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
+        let timed = GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) != 0;
+        CloseHandle(handle);
+        (running && timed).then(|| (((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64).to_string())
+    }
+}
+
+/// A name for this process that no other process has, now or later: its number and, on Linux and Windows, its
+/// start time.
 /// A run records it to say who is working on it.
 pub fn identity() -> String {
     let pid = std::process::id();
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     if let Some(t) = start_time(pid) {
         return format!("{pid}:{t}");
     }
@@ -231,7 +257,7 @@ pub fn alive(identity: &str) -> bool {
     if pid == std::process::id() {
         return false;
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     {
         match (start_time(pid), started) {
             (None, _) => false,
@@ -244,7 +270,7 @@ pub fn alive(identity: &str) -> bool {
         let _ = started;
         rustix::process::Pid::from_raw(pid as i32).is_some_and(|p| rustix::process::test_kill_process(p).is_ok())
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = started;
         false

@@ -3,6 +3,7 @@
 mod common;
 use common::*;
 use serde_json::{Value, json};
+#[cfg(unix)]
 use std::time::Duration;
 
 async fn kill(d: &mut Daemon) {
@@ -95,6 +96,7 @@ async fn a_daemon_killed_mid_run_is_restarted_and_the_run_resumes_to_completion(
         .to_string();
     c.wait_status(&d, &run, "waiting_approval").await;
     kill(&mut d).await;
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let (mut d, _) = serve(&s).await;
     let view = c.get(&d, &format!("/runs/{run}")).await;
     assert_eq!(view["status"], "waiting_approval", "a waiting run keeps waiting: {view}");

@@ -52,6 +52,10 @@ async fn the_editor_reads_and_writes_the_checkout_and_a_stopped_runs_worktree_wi
         ("missing.txt", 404),
         ("image.bin", 415),
     ] {
+        // The symbolic link is made only on Unix.
+        if path == "escape" && cfg!(not(unix)) {
+            continue;
+        }
         let (s, b) = d.get(&format!("/projects/site/file?path={path}")).await;
         assert_eq!(s, status, "{path}: {b}");
     }
