@@ -21,6 +21,7 @@ clap.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 
 [dev-dependencies]
 tempfile.workspace = true

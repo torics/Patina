@@ -158,6 +158,17 @@ fn check_origin(headers: &HeaderMap) -> ApiResult<()> {
     }
 }
 
+/// Guards the sign-in routes: a state-changing request must come from this same origin, checked before its body
+/// is read, so a cross-site post learns nothing from how its body was judged.
+pub async fn same_origin(req: Request, next: Next) -> Response {
+    if is_unsafe(req.method())
+        && let Err(e) = check_origin(req.headers())
+    {
+        return e.into_response();
+    }
+    next.run(req).await
+}
+
 #[derive(Clone)]
 pub struct SessionInfo {
     pub token: String,

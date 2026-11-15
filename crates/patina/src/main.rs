@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 mod doctor;
+mod ops;
 mod run;
 
 #[derive(Parser)]
@@ -102,8 +103,33 @@ enum Command {
         #[arg(long)]
         data_dir: Option<PathBuf>,
     },
+    /// Write a run as Markdown or JSON
+    Export {
+        /// The run's id, or its last characters as the UI shows them
+        run_id: String,
+        #[arg(long, value_enum, default_value = "md")]
+        format: ExportFormat,
+        /// The file to write. Without it the run goes to stdout
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+        #[arg(long)]
+        config_dir: Option<PathBuf>,
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
     /// Print version and build info
-    Version,
+    Version {
+        /// Also ask the release feed whether a newer version exists. This is the only outbound call Patina makes
+        /// that you did not configure, and it happens only when you pass this flag
+        #[arg(long)]
+        check: bool,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ExportFormat {
+    Md,
+    Json,
 }
 
 fn init_logging(format: LogFormat) {
@@ -200,8 +226,33 @@ async fn run_command(command: Command) -> Result<ExitCode> {
             }
             return Ok(if report.healthy() { ExitCode::SUCCESS } else { ExitCode::from(1) });
         }
-        Command::Version => {
-            println!("patina {}", env!("CARGO_PKG_VERSION"));
+        Command::Version { check } => {
+            println!("{}", ops::version_text());
+            if check {
+                match ops::check_release().await {
+                    Ok(said) => println!("{said}"),
+                    Err(e) => {
+                        eprintln!("patina: could not check for a newer release: {e:#}");
+                        return Ok(ExitCode::from(1));
+                    }
+                }
+            }
+        }
+        Command::Export {
+            run_id,
+            format,
+            output,
+            config_dir,
+            data_dir,
+        } => {
+            // Export only reads: the folders are not created here.
+            let paths = Paths::resolve(config_dir.as_deref(), data_dir.as_deref())
+                .context("cannot determine config and data folders; pass --config-dir and --data-dir")?;
+            let format = match format {
+                ExportFormat::Md => "md",
+                ExportFormat::Json => "json",
+            };
+            ops::export(&paths, &run_id, format, output.as_deref()).await?;
         }
         Command::ResetPassword { config_dir, data_dir } => {
             let paths = open_paths(config_dir, data_dir)?;
@@ -226,14 +277,15 @@ async fn run_command(command: Command) -> Result<ExitCode> {
 }
 
 /// Give each command a cgroup of its own where the daemon's cgroup is delegated, before anything is started.
-pub(crate) fn limit_commands() {
+/// Returns what to log about it.
+pub(crate) fn limit_commands() -> String {
     match patina_tools::cgroup::init() {
-        Ok(tree) => tracing::info!(
-            cgroup = %tree.own().display(),
-            "commands get cgroup v2 limits on {}",
-            patina_tools::cgroup::describe(tree.controllers())
+        Ok(tree) => format!(
+            "commands get cgroup v2 limits on {} under {}",
+            patina_tools::cgroup::describe(tree.controllers()),
+            tree.own().display()
         ),
-        Err(why) => tracing::info!("no cgroup v2 limits for commands: {why}"),
+        Err(why) => format!("no cgroup v2 limits for commands: {why}"),
     }
 }
 
@@ -276,13 +328,14 @@ async fn serve(
         }
     }
     let setup_token = patina_server::ensure_setup_token(&db).await?;
-    limit_commands();
+    let limits = limit_commands();
     let state = patina_server::state::AppState::new(paths, cfg, db, secrets, patina_server::genai_factory());
     let listener = patina_server::bind(addr).await.with_context(|| format!("cannot bind {addr}"))?;
     println!("Patina is running at http://{}", listener.local_addr()?);
     if let Some(t) = setup_token {
         println!("First run: open that address and enter this one-time setup token to set your password:\n  {t}");
     }
+    tracing::info!("{limits}");
     // The preview gets its own origin on a second port, always on loopback. Remote access goes through a tunnel
     // such as `tailscale serve`, as for the app. A port that is taken turns the preview off, not the daemon.
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);

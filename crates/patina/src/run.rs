@@ -275,7 +275,7 @@ pub async fn run(paths: Paths, args: RunArgs) -> Result<u8> {
     let db = patina_store::Db::open(&paths.database_file())?;
     let key = patina_store::secrets::master_key(&paths.data_dir)?;
     let secrets = patina_store::secrets::Secrets::new(db.clone(), key);
-    crate::limit_commands();
+    tracing::info!("{}", crate::limit_commands());
     let st = AppState::new(paths, cfg, db, secrets, patina_server::genai_factory());
 
     let project = project_for(&st, &args.project).await?;
