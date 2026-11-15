@@ -215,7 +215,20 @@ impl Sandbox for NoSandbox {
             .or_else(|| std::env::var_os("USERPROFILE"))
             .map(PathBuf::from)
             .unwrap_or_else(|| self.setup.home.clone());
-        let env = base_env(&self.setup, &home, marker);
+        #[cfg_attr(not(windows), allow(unused_mut))]
+        let mut env = base_env(&self.setup, &home, marker);
+        // Windows programs need a few more variables to start at all (Python, for one, fails without SystemRoot).
+        #[cfg(windows)]
+        {
+            for name in WINDOWS_ENV {
+                if let Some(v) = std::env::var_os(name).filter(|v| !v.is_empty()) {
+                    env.push((name.to_string(), v.to_string_lossy().into_owned()));
+                }
+            }
+            let tmp = self.setup.tmp.to_string_lossy().into_owned();
+            env.push(("TEMP".into(), tmp.clone()));
+            env.push(("TMP".into(), tmp));
+        }
         let (program, args) = shell(command);
         Ok(Prepared {
             program,
@@ -226,6 +239,27 @@ impl Sandbox for NoSandbox {
         })
     }
 }
+
+/// What a Windows program needs from the environment to start, beyond `PATH`. Nothing secret.
+#[cfg(windows)]
+const WINDOWS_ENV: &[&str] = &[
+    "PATHEXT",
+    "SystemRoot",
+    "SystemDrive",
+    "windir",
+    "ComSpec",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "ProgramData",
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+    "CommonProgramFiles",
+    "USERNAME",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+    "OS",
+];
 
 #[cfg(unix)]
 pub(crate) fn shell(command: &str) -> (PathBuf, Vec<String>) {

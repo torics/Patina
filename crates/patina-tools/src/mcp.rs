@@ -82,7 +82,8 @@ pub struct Connection {
     service: RunningService<RoleClient, ()>,
     tools: Vec<ServerTool>,
     stderr: Arc<Mutex<VecDeque<u8>>>,
-    /// The process group a stdio server leads.
+    /// The process group a stdio server leads. On Windows its job object stops it instead.
+    #[cfg_attr(windows, allow(dead_code))]
     group: Option<u32>,
     ended: AtomicBool,
 }

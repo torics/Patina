@@ -54,6 +54,7 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: npm, cache-dependency-path: ui/package-lock.json }
       - run: cargo xtask ui
+      - run: cargo clippy -- -D warnings
       - run: cargo build --release --locked -p patina
       - name: What this host supports
         shell: bash
