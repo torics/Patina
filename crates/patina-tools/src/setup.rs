@@ -103,7 +103,8 @@ pub async fn copy_ignored(repo: &Path, worktree: &Path, entries: &[String]) -> R
     .map_err(|e| e.to_string())?
 }
 
-#[cfg(test)]
+// The fixture needs a POSIX shell and symbolic links, which Windows gives only to administrators.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

@@ -315,15 +315,18 @@ mod tests {
             new.summary
         );
         // Only what is enforced is listed: without a delegated cgroup, memory is capped only in a container.
-        assert_eq!(
-            caps(Some(6), false).resource_limits(),
-            ["largest file a command may write (RLIMIT_FSIZE)"]
-        );
+        // RLIMIT_FSIZE exists only on Unix; on Windows nothing is enforced without a container.
+        let expected: &[&str] = if cfg!(unix) {
+            &["largest file a command may write (RLIMIT_FSIZE)"]
+        } else {
+            &[]
+        };
+        assert_eq!(caps(Some(6), false).resource_limits(), expected);
         let mut all = caps(Some(6), true);
         all.cgroup = CgroupState::Active(vec!["memory".into(), "pids".into()]);
         let listed = all.status().resource_limits;
         assert_eq!(listed[0], "memory and processes per command (cgroup v2)");
-        assert!(listed[2].starts_with("container backend:"), "{listed:?}");
+        assert!(listed.last().unwrap().starts_with("container backend:"), "{listed:?}");
         // A cgroup that could be used but was not set up enforces nothing.
         all.cgroup = CgroupState::Possible(vec!["memory".into()]);
         assert!(!all.resource_limits().iter().any(|l| l.contains("cgroup")));
