@@ -121,9 +121,29 @@
 ## M4 dependencies (stripped release binary: 10.9 MB, up from 10.6 MB; idle memory 10.1 MB; UI 23.1 KB gzipped)
 - None new. Test only: `reqwest` in the `patina` crate's tests, already used by the server tests, to drive a real daemon across a restart.
 
+## M5 choices
+- **Every mode is a composition of the one loop** (`patina-core::team`). The engine resolves the team into a roster of agents, each with its provider and tools, before anything is created, so a missing agent or provider refuses the run at once.
+- **A run names an agent or a team.** `NewRun` gained `team_id`; the run row keeps `agent:<id>` or `team:<id>`. `RunView` gained `team_id`. A one-agent run is a team in `single` mode, so there is one code path.
+- **Delegation is handled by the loop, not a `Tool`.** The `delegate` tool spec is added to the lead's request; the call runs the sub-agent's loop inside it, so a sub-agent that pauses, hits a budget or is interrupted stops the whole run and leaves the lead's call open. On resume the same sub-agent continues (found by `parent` and `tool_call_id` on its `agent_started`). It is always allowed: the sub-agent's own calls go through the policy. Depth: a lead may delegate, its sub-agent once more, no deeper (the brief's "maximum depth 2").
+- **Whom an agent may delegate to:** in `delegate` mode the lead may use the agents its `can_delegate_to` names, or else the other members. In `single` and `sequential` mode an agent with `can_delegate_to` gets the tool too. Parallel members never do, because they are read-only. A target that does not exist is left out.
+- **Parallel members are read-only** (only `ToolKind::Read` tools), as the brief allows; separate worktrees for parallel writers are not built. The synthesizer may write. A synthesizer cannot also be a member.
+- **Sub-agent ids** are `<agent>#<n>`, numbered past every id the run used, so stored histories never collide. Agent ids cannot contain `#`.
+- **Hand-offs** say plainly that earlier agents' messages are notes from colleagues, not the owner's instructions.
+- **Owner messages** go to one agent: the current member in sequential mode, the lead in delegate mode, the synthesizer in parallel mode (members running at once would race for them). Sub-agents never take them.
+- **Pause stays set** until the run ends, so every agent of a team stops; resuming makes fresh signals. (M4 cleared it when one agent saw it.)
+- **Resuming a team** skips agents whose last start or finish event says `completed`, or whose history ends with an answer (a crash between the answer and the event). It uses the team's current file; agents are matched by id.
+- **Templates** are built in (`patina-core::team_templates`) and name no provider or model. `POST /team-templates/:id` takes a provider and model for every agent, optional per-agent choices, and a team id; agents are named `<team id>-<template agent id>`, so a template can be used for several teams. *Compare models* asks for different models for its two members.
+- **Import and export** use one TOML file: `[team]` plus one `[[agent]]` per agent the team can reach, delegation included. It names providers by id and holds no secret. Import checks everything before writing anything; a team or agent that exists with other settings is a 409 unless `overwrite`; identical ones are left alone. Agents whose provider is missing can be given another with `provider`.
+- **An agent in a team cannot be deleted** (409 `in_use`) until the team stops naming it.
+- **`patina run --team <id>`** runs a team, or the agent with that id when there is no such team. Other agents' text and tool lines are labeled with their id.
+- **UI (kept minimal, per the guardrail):** a Teams section in Settings (from a template, by hand, import, export, delete), a role and delegation targets on the agent form, a team or agent picker in the composer, and sub-agent blocks nested under the `delegate` call that started them.
+
+## M5 dependencies (stripped release binary: 11.2 MB, up from 10.9 MB; idle memory 10.3 MB; UI 25.4 KB gzipped)
+- None new.
+
 ## Open risks
 - rustls uses aws-lc-rs, which needs a C toolchain when cross-compiling. Check static musl builds early in M8, and switch to the ring provider if needed.
-- Live checks against real hosted providers have not been run (they need the owner's keys). This now includes tool calls and reasoning replay on those providers.
+- Live checks: Gemini passed (streaming, a tool call, reasoning replay) on 2026-11-15. Anthropic, OpenAI and a local OpenAI-compatible endpoint have not been checked live yet.
 - Commands have no memory, CPU or process-count limit until M8. A command can slow the machine until its timeout.
 - Under Landlock a command can read `/proc` (names and command lines of other processes), can use UDP even with `network = false`, and before ABI 6 can signal other processes.
 - While a background command swaps folders for links, `list_files` and `search` can list file names outside the worktree, never content.
@@ -131,3 +151,5 @@
 - The container backend is tested against Docker only, not Podman.
 - Resuming after a crash relies on the event log describing each tool call. A tool whose effect lands outside the worktree (a command that calls a remote API) may have taken effect before the crash; the agent is told the call was interrupted and may have run in part.
 - Compaction quality depends on the model's summary. It is tested with scripted models only.
+- Team modes are tested with scripted models and fake endpoints. How well real models use `delegate` and hand-offs is not measured.
+- Members of a parallel team that share a provider share its concurrency limit, so they may run one after another.

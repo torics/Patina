@@ -5,10 +5,12 @@ use crate::events::EventType;
 use crate::policy::{Decision, PolicyMode, command_allowed, decide};
 use crate::provider::*;
 use crate::provider_config::Price;
+use crate::team::{self, TeamLink};
 use crate::tool::{Tool, ToolKind, ToolOutput, validate};
 use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::{Value, json};
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -81,6 +83,22 @@ pub trait RunHost: Send + Sync {
     async fn take_messages(&self, agent_id: &str) -> Result<Vec<String>, HostError>;
     /// Replace the agent's stored context after a compaction.
     async fn replace_history(&self, agent_id: &str, history: &[Message]) -> Result<(), HostError>;
+    /// Whether messages from the owner wait to be handed out.
+    async fn waiting_messages(&self) -> Result<bool, HostError>;
+    /// What is stored of one agent of the run: its context, where an unfinished last turn stands, and whether it
+    /// gave its final answer. An agent that never ran has an empty history.
+    async fn load_agent(&self, agent_id: &str) -> Result<Saved, HostError>;
+    /// Every agent id that has events in the run, so a new sub-agent gets an id of its own.
+    async fn agent_ids(&self) -> Result<Vec<String>, HostError>;
+}
+
+/// One agent's stored state, for resuming it.
+#[derive(Debug, Clone, Default)]
+pub struct Saved {
+    pub history: Vec<Message>,
+    pub resume: Vec<CallState>,
+    /// The agent finished with a final answer.
+    pub finished: bool,
 }
 
 /// Requests from outside that the loop honors at its next safe point.
@@ -110,12 +128,10 @@ pub struct AgentSpec {
 /// A project's command allowlist patterns, shared between the run and whoever edits them.
 pub type Allowlist = Arc<std::sync::RwLock<Vec<String>>>;
 
-/// Everything one agent needs to run.
-pub struct RunCtx<'a> {
-    pub provider: Arc<dyn ChatProvider>,
+/// What every agent of a run shares.
+#[derive(Clone)]
+pub struct RunEnv<'a> {
     pub host: &'a dyn RunHost,
-    /// Only the tools named in the agent's `tools` list.
-    pub tools: Vec<Arc<dyn Tool>>,
     pub policy: PolicyMode,
     /// Whether commands run contained. Without containment every edit and command is confirmed.
     pub sandboxed: bool,
@@ -126,6 +142,51 @@ pub struct RunCtx<'a> {
     pub project_instructions: Option<String>,
     pub cancel: CancellationToken,
     pub signals: Arc<Signals>,
+}
+
+/// Everything one agent needs to run: what the run shares, and the agent's own model, tools and place in a team.
+pub struct RunCtx<'a> {
+    pub env: RunEnv<'a>,
+    pub provider: Arc<dyn ChatProvider>,
+    /// Only the tools named in the agent's `tools` list.
+    pub tools: Vec<Arc<dyn Tool>>,
+    /// Whether the owner's messages reach this agent. They reach the agent the owner talks to, never a sub-agent.
+    pub steerable: bool,
+    /// For a sub-agent: the agent and the `delegate` call that started it.
+    pub parent: Option<(String, String)>,
+    /// The team around this agent, and whom it may hand tasks to. `None` for an agent alone.
+    pub team: Option<TeamLink<'a>>,
+}
+
+impl<'a> RunCtx<'a> {
+    /// An agent on its own: it takes the owner's messages and cannot delegate.
+    pub fn alone(env: RunEnv<'a>, provider: Arc<dyn ChatProvider>, tools: Vec<Arc<dyn Tool>>) -> RunCtx<'a> {
+        RunCtx {
+            env,
+            provider,
+            tools,
+            steerable: true,
+            parent: None,
+            team: None,
+        }
+    }
+
+    fn delegating(&self) -> Option<&TeamLink<'a>> {
+        self.team.as_ref().filter(|t| !t.targets.is_empty())
+    }
+}
+
+impl<'a> Deref for RunCtx<'a> {
+    type Target = RunEnv<'a>;
+    fn deref(&self) -> &RunEnv<'a> {
+        &self.env
+    }
+}
+
+impl DerefMut for RunCtx<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.env
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -174,6 +235,8 @@ pub enum CallState {
     Interrupted,
     /// The owner answered its approval request while the run was not active.
     Decided(ApprovalDecision),
+    /// A `delegate` call whose sub-agent had started: that agent continues where it stopped.
+    Delegated { instance: String },
 }
 
 /// System prompt: fixed preamble, the agent's own prompt, then the project's instructions (capped at 20 KB).
@@ -205,6 +268,47 @@ pub fn backoff_delay(attempt: u32, retry_after: Option<Duration>) -> Duration {
     retry_after.map_or(d, |r| r.max(d))
 }
 
+/// The text of the agent's last message: what it hands on when it finishes.
+pub fn final_text(history: &[Message]) -> String {
+    let text = history
+        .iter()
+        .rev()
+        .find(|m| m.role == Role::Assistant)
+        .map(|m| {
+            m.parts
+                .iter()
+                .filter_map(|p| match p {
+                    Part::Text(t) => Some(t.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+    if text.trim().is_empty() {
+        "(The agent finished without a final message.)".to_string()
+    } else {
+        text
+    }
+}
+
+/// True when the history ends with the agent's final answer: an assistant message without tool calls.
+pub fn answered(history: &[Message]) -> bool {
+    history
+        .last()
+        .is_some_and(|m| m.role == Role::Assistant && !m.parts.iter().any(|p| matches!(p, Part::ToolCall { .. })))
+}
+
+/// Save the first message of an agent that has not run yet.
+pub async fn seed(host: &dyn RunHost, agent_id: &str, history: &mut Vec<Message>, prompt: &str) -> Result<(), HostError> {
+    if history.is_empty() {
+        let first = Message::user(prompt.to_string());
+        host.save_message(agent_id, 0, &first).await?;
+        history.push(first);
+    }
+    Ok(())
+}
+
 /// Cut long output to its head and tail, on character boundaries.
 pub fn truncate_output(s: &str) -> Option<String> {
     if s.len() <= MAX_TOOL_OUTPUT {
@@ -230,13 +334,12 @@ pub fn truncate_output(s: &str) -> Option<String> {
 pub async fn run_agent(spec: &AgentSpec, ctx: &RunCtx<'_>, history: &mut Vec<Message>, resume: Vec<CallState>) -> Outcome {
     let agent = Some(spec.id.as_str());
     let result = async {
-        ctx.host
-            .append(
-                agent,
-                EventType::AgentStarted,
-                json!({"name": spec.name, "provider": spec.provider_id, "model": spec.model}),
-            )
-            .await?;
+        let mut started = json!({"name": spec.name, "agent": team::base_id(&spec.id), "provider": spec.provider_id, "model": spec.model});
+        if let Some((parent, call)) = &ctx.parent {
+            started["parent"] = json!(parent);
+            started["tool_call_id"] = json!(call);
+        }
+        ctx.host.append(agent, EventType::AgentStarted, started).await?;
         let outcome = steps(spec, ctx, history, resume).await?;
         let status = match &outcome {
             Outcome::Completed => "completed",
@@ -332,6 +435,9 @@ async fn record_usage(
 
 /// Hand the owner's waiting messages to the agent as user messages. True if there were any.
 async fn deliver(spec: &AgentSpec, ctx: &RunCtx<'_>, history: &mut Vec<Message>) -> Result<bool, HostError> {
+    if !ctx.steerable {
+        return Ok(false);
+    }
     let texts = ctx.host.take_messages(&spec.id).await?;
     for text in &texts {
         ctx.host
@@ -492,7 +598,10 @@ async fn compact_history(
 async fn steps(spec: &AgentSpec, ctx: &RunCtx<'_>, history: &mut Vec<Message>, resume: Vec<CallState>) -> Result<Outcome, HostError> {
     let agent = Some(spec.id.as_str());
     let system = build_system(spec, ctx.project_instructions.as_deref());
-    let specs: Vec<ToolSpec> = ctx.tools.iter().map(|t| t.spec()).collect();
+    let mut specs: Vec<ToolSpec> = ctx.tools.iter().map(|t| t.spec()).collect();
+    if let Some(link) = ctx.delegating() {
+        specs.push(team::delegate_spec(link));
+    }
     // What every request carries besides the history.
     let fixed_chars = system.len()
         + specs
@@ -518,7 +627,8 @@ async fn steps(spec: &AgentSpec, ctx: &RunCtx<'_>, history: &mut Vec<Message>, r
                 if ctx.cancel.is_cancelled() {
                     return Ok(stopped(ctx));
                 }
-                if ctx.signals.pause.swap(false, Ordering::SeqCst) {
+                // The flag stays set, so every agent of the run stops; resuming starts with a fresh one.
+                if ctx.signals.pause.load(Ordering::SeqCst) {
                     return Ok(Outcome::Paused(PauseReason::Owner));
                 }
                 if let Some(limit) = ctx.budget.exhausted() {
@@ -645,11 +755,12 @@ async fn steps(spec: &AgentSpec, ctx: &RunCtx<'_>, history: &mut Vec<Message>, r
                     let out = if state == CallState::Interrupted {
                         ToolOutput::error(INTERRUPTED_CALL)
                     } else {
-                        let (decided, logged) = match state {
+                        let (decided, logged, delegated) = match state {
                             // The call was logged, and asked about, before the run was interrupted.
-                            CallState::Decided(d) => (Some(d), true),
-                            CallState::Logged => (None, true),
-                            _ => (None, false),
+                            CallState::Decided(d) => (Some(d), true, None),
+                            CallState::Logged => (None, true, None),
+                            CallState::Delegated { instance } => (None, true, Some(instance)),
+                            _ => (None, false, None),
                         };
                         if !logged {
                             ctx.host
@@ -665,6 +776,13 @@ async fn steps(spec: &AgentSpec, ctx: &RunCtx<'_>, history: &mut Vec<Message>, r
                         }
                         match parse_error {
                             Some(e) => ToolOutput::error(e),
+                            // A sub-agent that stops stops the run, and this turn stays open until it is resumed.
+                            None if call.name == team::DELEGATE && ctx.delegating().is_some() => {
+                                match team::delegate(spec, ctx, &call, delegated).await? {
+                                    Ok(out) => out,
+                                    Err(outcome) => return Ok(outcome),
+                                }
+                            }
                             None => match execute(spec, ctx, &call, decided).await? {
                                 Some(out) => out,
                                 // A shutdown leaves the turn as it is: the log says where each call stands.

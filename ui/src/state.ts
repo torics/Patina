@@ -6,6 +6,8 @@ import type { ProjectView } from "./api/generated/ProjectView";
 import type { ProviderView } from "./api/generated/ProviderView";
 import type { RunView } from "./api/generated/RunView";
 import type { SandboxStatus } from "./api/generated/SandboxStatus";
+import type { TeamConfig } from "./api/generated/TeamConfig";
+import type { TemplateView } from "./api/generated/TemplateView";
 import { api, ApiError } from "./api";
 import { applyDelta, applyEvent, emptyTimeline, isActive, type Timeline } from "./reducer";
 
@@ -14,6 +16,9 @@ export const screen = signal<Screen>("loading");
 export const view = signal<"chat" | "settings">("chat");
 export const providers = signal<ProviderView[]>([]);
 export const agents = signal<AgentConfig[]>([]);
+export const teams = signal<TeamConfig[]>([]);
+/** The built-in team templates. They name no provider or model. */
+export const templates = signal<TemplateView[]>([]);
 export const projects = signal<ProjectView[]>([]);
 /** Names of the tools an agent can be given, as the daemon reports them. */
 export const toolNames = signal<string[]>([]);
@@ -56,8 +61,9 @@ export async function enter() {
 }
 
 export async function refresh() {
-  const [p, a, r, pr, sys] = await Promise.all([api.providers(), api.agents(), api.runs(), api.projects(), api.system()]);
-  [providers.value, agents.value, runs.value, projects.value, toolNames.value, sandbox.value, retentionDays.value] = [p, a, r, pr, sys.tools, sys.sandbox, sys.retention_days];
+  const [p, a, t, tpl, r, pr, sys] = await Promise.all([api.providers(), api.agents(), api.teams(), api.templates(), api.runs(), api.projects(), api.system()]);
+  [providers.value, agents.value, teams.value, templates.value, runs.value, projects.value] = [p, a, t, tpl, r, pr];
+  [toolNames.value, sandbox.value, retentionDays.value] = [sys.tools, sys.sandbox, sys.retention_days];
 }
 
 let source: EventSource | null = null;
@@ -125,8 +131,10 @@ export async function continueRun(id: string, message: string | null) {
   catchUp(id);
 }
 
-export async function startRun(agentId: string, prompt: string, projectId: string | null, budgets: Budgets | null) {
-  const run = await api.createRun({ agent_id: agentId, prompt, project_id: projectId, budgets });
+/** Who runs: `team:<id>` or `agent:<id>`, as the composer's picker holds it. */
+export async function startRun(who: string, prompt: string, projectId: string | null, budgets: Budgets | null) {
+  const [kind, id] = who.split(/:(.*)/s);
+  const run = await api.createRun(kind === "team" ? { agent_id: "", team_id: id, prompt, project_id: projectId, budgets } : { agent_id: id, team_id: null, prompt, project_id: projectId, budgets });
   runs.value = [run, ...runs.value];
   openRun(run.id);
 }

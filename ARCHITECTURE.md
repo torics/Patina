@@ -12,11 +12,13 @@ One Cargo workspace, one binary. The browser is a thin view over the daemon's AP
 | `patina` | The CLI binary that wires them together: `serve`, `run`, `doctor`, `reset-password`, `version`, and the hidden `sandbox-exec` helper. |
 | `xtask` | Build helper: `cargo xtask ui`. Not part of the binary. |
 
+Team files and templates live in `patina-core` (`team_config`, `team_templates`); team routes in `patina-server::teams`.
+
 ## One run
 
 1. `POST /api/v1/runs` (or `patina run`) calls `engine::start_run`. With a project, it first settles the sandbox: the backend the project asks for is resolved against what the host supports, and a backend that is missing refuses the run. Then it creates the worktree `worktrees/<run id>` on branch `patina/run-<id>` from the project's `HEAD`, and gives the agent the tools named in its config, bound to that worktree and that sandbox. Then it spawns a tokio task.
 1. The task logs `run_started` with the sandbox level, then prepares the worktree: it copies the project's `worktree_copy` entries and runs `worktree_setup` inside the sandbox. Both are logged as tool calls that belong to no agent, and a failure fails the run.
-2. The task calls `run_agent` in core. Each step: check cancel and budgets, stream one model turn (with retries), save the assistant message, then handle the tool calls in order.
+2. The task calls `team::run_team` in core, which runs each agent with `run_agent` (see Teams). Each step: check cancel and budgets, stream one model turn (with retries), save the assistant message, then handle the tool calls in order.
 3. For each call: log `tool_call`, validate the arguments against the tool's schema, ask the policy. If the policy says ask, the host stores an approval row, logs `approval_requested`, sets the run to `waiting_approval` and waits for the owner's answer. Then the tool runs, and `tool_result` is logged. A call always gets a result, even when denied or cancelled.
 4. If the step changed files, the host commits the worktree as a checkpoint and logs `checkpoint`. A command counts as a change; the checkpoint finds out whether anything differs.
 1. When the loop ends, however it ends, the run's background processes are stopped and its sandbox is released.
@@ -35,6 +37,17 @@ The event log is the single source of truth for the UI. Each agent's model conte
 - **Messages** from the owner go to the `steering` table. The loop takes them before each model turn, logs `user_message`, and appends them to the history after the tool results, so they never split a call from its result. A rollback note uses the same path.
 - **Compaction** (`patina-core::compact`) runs before a model turn when the estimated history passes 70% of `context_window`. The estimate is four characters per token, scaled by the ratio the provider's own counts showed so far. Stage one replaces tool outputs of 2 KB or more older than the latest three turns with a pointer to an artifact. Stage two asks the same model, with no tools, to summarize everything between the prompt and the latest ten turns (fewer if ten do not fit); the prompt stays word for word, followed by the summary. History is only cut in front of an assistant message, so a call and its result stay together. The new history replaces the stored one in one transaction, and a `compaction` event records the numbers.
 - **Retention** (`engine::prune`) deletes events, messages, approvals, delivered messages and artifacts of runs that ended before the cutoff and marks them `pruned_at`.
+
+## Teams
+
+`patina-core::team` composes every mode from the single-agent loop. Before a run starts, the engine resolves the team (`team:<id>`) or agent (`agent:<id>`) stored on the run into a `Team` and a `Roster`: every agent the run can reach, delegation followed to depth two, each with its provider and the tools its file names. A missing agent or provider stops the run before anything is created.
+
+- **Ids.** An agent the run starts itself has its own id as its instance id; a sub-agent is `<agent>#<n>`, numbered past every id the run already used. Events and stored messages use the instance id, and `agent_started` carries `agent` (the config id) and, for a sub-agent, `parent` and `tool_call_id`.
+- **Shared, and not.** All agents share the run's `RunEnv`: host, policy, sandbox, allowlist, budget, cancel and signals. Each has its own `RunCtx`: provider, tools, whether the owner's messages reach it (`steerable`), and its place in the team (`TeamLink`).
+- **Sequential** runs members in order; each gets a hand-off message: the prompt, then each earlier member's final message. **Parallel** runs members concurrently with only `ToolKind::Read` tools, then the synthesizer gets the prompt and every answer. **Delegate** adds a `delegate` tool to the lead's request. The loop handles a `delegate` call itself: the sub-agent runs its own loop inside the call, and its final message becomes the call's result. If the sub-agent stops for any other reason (pause, budget, shutdown, failure), the run stops with it and the lead's turn stays open.
+- **Resume.** `run_team` asks the host for each agent's stored state (`RunHost::load_agent`): history, where an unfinished turn stands, and whether the agent already gave its final answer (its latest start or finish event says `completed`, or its history ends with an answer). Finished agents are not run again; their final message is read from their history. For a `delegate` call that was logged without a result, `call_states` finds the sub-agent it started and the call continues with that agent (`CallState::Delegated`).
+- **Pause** is sticky in a team: the flag stays set until the run ends, so every agent stops at its next turn. Resume makes a new one.
+- **Messages** from the owner reach the agent the owner talks to: the current member in sequential mode, the lead in delegate mode, the synthesizer in parallel mode. The last agent answers a message that arrives as it finishes.
 
 ## Workspaces
 

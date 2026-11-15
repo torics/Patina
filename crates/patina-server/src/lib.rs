@@ -7,6 +7,7 @@ pub mod error;
 pub mod projects;
 pub mod runs;
 pub mod state;
+pub mod teams;
 
 use axum::{
     Router,
@@ -39,6 +40,12 @@ pub fn router(st: Arc<AppState>) -> Router {
         .route("/providers/{id}/models", get(api::provider_models))
         .route("/agents", get(api::list_agents).post(api::create_agent))
         .route("/agents/{id}", put(api::update_agent).delete(api::delete_agent))
+        .route("/teams", get(teams::list).post(teams::create))
+        .route("/teams/import", post(teams::import))
+        .route("/teams/{id}", put(teams::update).delete(teams::delete))
+        .route("/teams/{id}/export", get(teams::export))
+        .route("/team-templates", get(teams::templates))
+        .route("/team-templates/{id}", post(teams::from_template))
         .route("/runs", get(runs::list_runs).post(runs::create_run))
         .route("/runs/{id}", get(runs::get_run))
         .route("/runs/{id}/cancel", post(runs::cancel_run))

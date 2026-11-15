@@ -345,6 +345,70 @@ pub async fn last_seq_of(db: &Db, run_id: &str, agent_id: &str, kind: &str) -> R
     .await
 }
 
+/// The latest event of the agent among the given types.
+pub async fn last_event_of(db: &Db, run_id: &str, agent_id: &str, kinds: &[&str]) -> Result<Option<Event>, StoreError> {
+    let (run_id, agent_id) = (run_id.to_string(), agent_id.to_string());
+    let kinds: Vec<String> = kinds.iter().map(|k| k.to_string()).collect();
+    db.call(move |c| {
+        let marks = vec!["?"; kinds.len()].join(", ");
+        let sql = format!(
+            "SELECT seq, ts, type, payload_json FROM events WHERE run_id = ? AND agent_id = ? AND type IN ({marks}) ORDER BY seq DESC LIMIT 1"
+        );
+        let mut values: Vec<&dyn rusqlite::ToSql> = vec![&run_id, &agent_id];
+        values.extend(kinds.iter().map(|k| k as &dyn rusqlite::ToSql));
+        let row = c
+            .query_row(&sql, values.as_slice(), |r| {
+                let p: String = r.get(3)?;
+                Ok(Event {
+                    run_id: run_id.clone(),
+                    seq: r.get(0)?,
+                    ts: r.get(1)?,
+                    agent_id: Some(agent_id.clone()),
+                    kind: r.get(2)?,
+                    payload: serde_json::from_str(&p).unwrap_or(Value::Null),
+                })
+            })
+            .optional()?;
+        Ok(row)
+    })
+    .await
+}
+
+/// Events of one type with `seq > after`, oldest first, from every agent.
+pub async fn events_of_kind(db: &Db, run_id: &str, kind: &str, after: i64) -> Result<Vec<Event>, StoreError> {
+    let (run_id, kind) = (run_id.to_string(), kind.to_string());
+    db.call(move |c| {
+        let mut s =
+            c.prepare("SELECT seq, ts, agent_id, payload_json FROM events WHERE run_id = ?1 AND type = ?2 AND seq > ?3 ORDER BY seq")?;
+        let rows = s
+            .query_map(params![run_id, kind, after], |r| {
+                let p: String = r.get(3)?;
+                Ok(Event {
+                    run_id: run_id.clone(),
+                    seq: r.get(0)?,
+                    ts: r.get(1)?,
+                    agent_id: r.get(2)?,
+                    kind: kind.clone(),
+                    payload: serde_json::from_str(&p).unwrap_or(Value::Null),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    })
+    .await
+}
+
+/// Every agent id that has events in the run.
+pub async fn agent_ids(db: &Db, run_id: &str) -> Result<Vec<String>, StoreError> {
+    let run_id = run_id.to_string();
+    db.call(move |c| {
+        let mut s = c.prepare("SELECT DISTINCT agent_id FROM events WHERE run_id = ?1 AND agent_id IS NOT NULL")?;
+        let rows = s.query_map([run_id], |r| r.get(0))?.collect::<Result<Vec<String>, _>>()?;
+        Ok(rows)
+    })
+    .await
+}
+
 /// Replace an agent's stored context, after a compaction. One transaction: a crash leaves the old or the new.
 pub async fn replace_messages(db: &Db, run_id: &str, agent_id: &str, messages: &[Message]) -> Result<(), StoreError> {
     let (run_id, agent_id) = (run_id.to_string(), agent_id.to_string());
@@ -485,6 +549,36 @@ mod tests {
         let after2 = events_after(&db, "r1", 2, 100).await.unwrap();
         assert_eq!(after2.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![3, 4, 5]);
         assert_eq!(after2[0].payload["i"], 2);
+    }
+
+    #[tokio::test]
+    async fn events_by_agent_and_type_for_team_runs() {
+        let (_t, db) = db().await;
+        create_run(&db, "r1", "", "team:t", "hi", &json!({})).await.unwrap();
+        append_event(&db, "r1", None, "run_started", json!({})).await.unwrap();
+        append_event(&db, "r1", Some("lead"), "agent_started", json!({})).await.unwrap();
+        append_event(&db, "r1", Some("helper#2"), "agent_started", json!({"parent": "lead"}))
+            .await
+            .unwrap();
+        append_event(&db, "r1", Some("helper#2"), "text", json!({})).await.unwrap();
+        append_event(&db, "r1", Some("helper#2"), "agent_finished", json!({"status": "completed"}))
+            .await
+            .unwrap();
+        let last = last_event_of(&db, "r1", "helper#2", &["agent_started", "agent_finished"])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (last.seq, last.kind.as_str(), &last.payload["status"]),
+            (5, "agent_finished", &json!("completed"))
+        );
+        assert!(last_event_of(&db, "r1", "nobody", &["agent_started"]).await.unwrap().is_none());
+        let started = events_of_kind(&db, "r1", "agent_started", 2).await.unwrap();
+        assert_eq!(started.len(), 1);
+        assert_eq!(started[0].agent_id.as_deref(), Some("helper#2"));
+        let mut ids = agent_ids(&db, "r1").await.unwrap();
+        ids.sort();
+        assert_eq!(ids, ["helper#2", "lead"]);
     }
 
     #[tokio::test]

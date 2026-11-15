@@ -6,7 +6,15 @@ export type RunView = { id: string,
 /**
  * Empty for a plain chat with no project.
  */
-project_id: string, agent_id: string, prompt: string, status: string, budgets: Budgets, usage: Usage, branch: string | null, base_commit: string | null, 
+project_id: string, 
+/**
+ * The agent of a one-agent run; empty for a team run.
+ */
+agent_id: string, 
+/**
+ * The team of a team run.
+ */
+team_id: string | null, prompt: string, status: string, budgets: Budgets, usage: Usage, branch: string | null, base_commit: string | null, 
 /**
  * True while the run's worktree exists on disk.
  */

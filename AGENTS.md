@@ -16,4 +16,6 @@
 - New event types or payload fields need a case in `ui/src/reducer.ts` and a test in `ui/src/reducer.test.ts`.
 - Never add a message to an agent's stored history from outside the loop: it could land between a tool call and its result. Queue it with `store::add_steering`; the loop delivers it before the next model turn.
 - An agent's history may only be cut in front of an assistant message (`compact::turn_start`). Any new way of shortening history needs the pairing test in `compact.rs`.
+- Every team mode goes through `team::run_team` and the one agent loop. A sub-agent's work happens inside its lead's `delegate` call; never run an agent beside the loop.
+- Event and message rows use an agent's instance id (`builder#2` for a sub-agent). Use `team::base_id` to get the agent's config id.
 - Anything a run does that must survive a restart is written before it takes effect: the approval row before the event, `delivered` before the call runs, usage with every `usage` event.

@@ -36,12 +36,12 @@ enum Command {
         #[arg(long, value_enum, default_value = "human")]
         log_format: LogFormat,
     },
-    /// Run one agent on a project from the terminal, printing its events and asking for approvals here
+    /// Run a team or one agent on a project from the terminal, printing its events and asking for approvals here
     Run {
         /// The project folder: the top level of a git repository
         #[arg(long)]
         project: PathBuf,
-        /// The agent to run (teams of several agents arrive in a later version)
+        /// The team to run, or a single agent
         #[arg(long, alias = "agent")]
         team: String,
         /// Skip approvals. Accepted only when a sandbox is active

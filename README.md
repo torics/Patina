@@ -2,7 +2,7 @@
 
 A lean, self-hosted, model-agnostic agent workbench in one Rust binary. The daemon serves a browser UI, holds your API keys, calls any LLM provider on your behalf and stores every run so you can watch and review it from any device.
 
-Status: **M4 (durability)**. You can set a password, add providers and agents, and chat with streaming. An agent can work in a project: it reads, searches and edits files and runs commands in its own git worktree. Commands run in a sandbox (Landlock on Linux, or a container), each changing step is a checkpoint you can roll back to, and nothing reaches your branch until you merge. Runs can be paused, resumed and steered with messages, survive a restart of the daemon, and keep long histories inside the model's context. Teams, the file workbench and MCP arrive in later milestones. See `DECISIONS.md`.
+Status: **M5 (teams)**. You can set a password, add providers and agents, and chat with streaming. An agent can work in a project: it reads, searches and edits files and runs commands in its own git worktree. Commands run in a sandbox (Landlock on Linux, or a container), each changing step is a checkpoint you can roll back to, and nothing reaches your branch until you merge. Runs can be paused, resumed and steered with messages, survive a restart of the daemon, and keep long histories inside the model's context. Teams run several agents, each on its own provider and model, from three built-in templates or your own. The file workbench and MCP arrive in later milestones. See `DECISIONS.md`.
 
 ## Build and run
 
@@ -29,6 +29,21 @@ While a run works you can **message the agent**: it reads your message before it
 If the daemon stops (a clean shutdown, a crash, a reboot), a run in progress is marked *interrupted* and anything its commands left running is stopped at the next start. Resume it: the agent continues from its stored context, and a tool call that was cut off is reported to it as interrupted, not repeated. A run that was waiting for your approval keeps waiting, and answering resumes it.
 
 When a run's history grows past 70% of the agent's `context_window`, Patina first replaces old large tool outputs with a pointer to a saved copy, then has the same model summarize the oldest turns, keeping the latest ten word for word. The timeline notes each time it does.
+
+## Teams
+
+A team runs several agents on one prompt, each with its own provider and model. They share the run's limits, and each keeps its own history: agents see only each other's final messages, never their transcripts.
+
+| Mode | What happens |
+| --- | --- |
+| `single` | One agent. |
+| `sequential` | Members run in order. Each gets your prompt and the final message of every member before it. |
+| `parallel` | Members answer at once and cannot change files, then the synthesizer gets every answer and replies. Your messages reach the synthesizer. |
+| `delegate` | The first member leads. It gets a `delegate` tool to hand a task to another member (or to the agents its `can_delegate_to` names). The helper starts with a fresh context, sees only the task, and returns only its final message. A helper may delegate once more, no deeper. |
+
+In Settings, **Team from a template** makes one of three teams: *Solo builder*, *Plan, build, review*, and *Compare models* (two agents on different models and a judge). You pick the provider and model; a template names none. Teams can also be made by hand, exported as one TOML file with their agents (it holds no secret), and imported on another machine, with a provider of your choice for agents whose provider does not exist there. In the composer, pick the team instead of an agent. `patina run --team <id>` runs a team, or a single agent when no team has that id.
+
+A helper's work is shown inside the `delegate` call that started it. Pausing a team stops every agent; resuming continues each one where it stopped, and agents that had finished are not run again.
 
 When the run stops, the Changes section shows the diff and offers: merge into your branch (your checkout must be clean), download a patch, keep the branch, or discard. Patina never pushes.
 

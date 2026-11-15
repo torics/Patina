@@ -16,6 +16,11 @@ import type { ProviderView } from "./api/generated/ProviderView";
 import type { RunView } from "./api/generated/RunView";
 import type { SessionState } from "./api/generated/SessionState";
 import type { SystemInfo } from "./api/generated/SystemInfo";
+import type { TeamConfig } from "./api/generated/TeamConfig";
+import type { TeamImport } from "./api/generated/TeamImport";
+import type { TeamImported } from "./api/generated/TeamImported";
+import type { TemplateInput } from "./api/generated/TemplateInput";
+import type { TemplateView } from "./api/generated/TemplateView";
 
 /** The settings of a project that can change. The id and the folder cannot. */
 export type ProjectPatch = { [K in Exclude<keyof ProjectConfig, "id" | "path">]?: ProjectConfig[K] | null };
@@ -74,6 +79,14 @@ export const api = {
   createAgent: (a: Partial<AgentConfig>) => call<AgentConfig>("POST", "/agents", a),
   updateAgent: (a: Partial<AgentConfig> & { id: string }) => call<AgentConfig>("PUT", `/agents/${encodeURIComponent(a.id)}`, a),
   deleteAgent: (id: string) => call("DELETE", `/agents/${encodeURIComponent(id)}`),
+  teams: () => call<TeamConfig[]>("GET", "/teams"),
+  createTeam: (t: TeamConfig) => call<TeamConfig>("POST", "/teams", t),
+  updateTeam: (t: TeamConfig) => call<TeamConfig>("PUT", `/teams/${encodeURIComponent(t.id)}`, t),
+  deleteTeam: (id: string) => call("DELETE", `/teams/${encodeURIComponent(id)}`),
+  importTeam: (i: TeamImport) => call<TeamImported>("POST", "/teams/import", i),
+  exportTeamUrl: (id: string) => `${BASE}/teams/${encodeURIComponent(id)}/export`,
+  templates: () => call<TemplateView[]>("GET", "/team-templates"),
+  fromTemplate: (id: string, input: TemplateInput) => call<TeamImported>("POST", `/team-templates/${encodeURIComponent(id)}`, input),
   runs: () => call<RunView[]>("GET", "/runs"),
   createRun: (r: NewRun) => call<RunView>("POST", "/runs", r),
   cancelRun: (id: string) => call("POST", `/runs/${encodeURIComponent(id)}/cancel`, {}),

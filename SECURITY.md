@@ -108,6 +108,12 @@ This protects backups and copied database files. It does not protect against a c
 - A tool call that was cut off is reported to the agent as interrupted. It is never run a second time on Patina's initiative. A call you approved while the daemon was down runs once, when you resume.
 - Messages you send to a run are your instructions to the agent, like the prompt. Text in files and tool results still is not.
 
+## Teams
+
+- Every agent of a team runs under the same project policy and sandbox as a single agent. A sub-agent's calls are asked about like its lead's; `delegate` itself changes nothing.
+- Members of a parallel team get read tools only. Their answers reach the synthesizer as data, marked as notes from colleagues, not instructions from the owner. The same holds for hand-offs between sequential members and for a sub-agent's final message.
+- An exported team file names providers by id and never carries a key.
+
 ## Not in place yet
 
 - Resource limits for commands (cgroup v2), planned for the hardening milestone.

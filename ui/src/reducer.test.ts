@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Event } from "./api/generated/Event";
-import { applyDelta, applyEvent, emptyTimeline, isActive, isTerminal, visibleText, waitingApprovals, type ToolItem } from "./reducer";
+import { applyDelta, applyEvent, delegated, emptyTimeline, isActive, isTerminal, topBlocks, visibleText, waitingApprovals, type ToolItem } from "./reducer";
 
 let seq = 0;
 function ev(type: string, payload: Record<string, any> = {}, agent: string | null = "a"): Event {
@@ -260,5 +260,56 @@ describe("event reducer", () => {
     t = applyEvent(t, ev("run_finished", { status: "paused", reason: "owner", error: null }, null));
     expect(t.blocks[0].items.at(-1)).toEqual({ kind: "note", text: "Paused. Resume it, or send the agent a message.", tone: "info" });
     expect(isActive("waiting_approval") && isActive("queued") && !isActive("interrupted")).toBe(true);
+  });
+
+  it("shows a team run's agents in order and nests a sub-agent under the delegate call that started it", () => {
+    seq = 0;
+    const t = build([
+      ev("run_started", { prompt: "go", team: "duo", mode: "delegate" }, null),
+      ev("agent_started", { name: "Lead", agent: "lead", model: "m1" }, "lead"),
+      ev("tool_call", { id: "d1", name: "delegate", args: { agent: "builder", task: "Build" } }, "lead"),
+      ev("agent_started", { name: "Builder", agent: "builder", model: "m2", parent: "lead", tool_call_id: "d1" }, "builder#2"),
+      ev("tool_call", { id: "w1", name: "write_file", args: { path: "a" } }, "builder#2"),
+      ev("approval_requested", { approval_id: "ap", tool_call_id: "w1", name: "write_file", args: {} }, "builder#2"),
+      ev("approval_resolved", { approval_id: "ap", tool_call_id: "w1", action: "approve" }, "builder#2"),
+      ev("tool_result", { id: "w1", content: "wrote a", is_error: false }, "builder#2"),
+      ev("text", { text: "Built.", attempt: 0, step: 3 }, "builder#2"),
+      ev("agent_finished", { status: "completed" }, "builder#2"),
+      ev("tool_result", { id: "d1", content: "Built.", is_error: false }, "lead"),
+      ev("text", { text: "Done.", attempt: 0, step: 4 }, "lead"),
+    ]);
+    expect([t.team, t.mode]).toEqual(["duo", "delegate"]);
+    expect(topBlocks(t).map((b) => b.agentId)).toEqual(["lead"]);
+    const subs = delegated(t, "lead", "d1");
+    expect(subs.map((b) => [b.agentId, b.name, b.model])).toEqual([["builder#2", "Builder", "m2"]]);
+    expect(visibleText(subs[0])).toBe("Built.");
+    expect((subs[0].items[0] as ToolItem).state).toBe("done");
+    expect((topBlocks(t)[0].items[0] as ToolItem).result).toBe("Built.");
+    expect(delegated(t, "lead", "other")).toEqual([]);
+  });
+
+  it("keeps a sub-agent's block when it continues after a restart, and finds its pending approval", () => {
+    seq = 0;
+    let t = build([
+      ev("run_started", { team: "duo", mode: "delegate" }, null),
+      ev("agent_started", { name: "Lead" }, "lead"),
+      ev("tool_call", { id: "d1", name: "delegate", args: {} }, "lead"),
+      ev("agent_started", { name: "Builder", parent: "lead", tool_call_id: "d1" }, "builder#2"),
+      ev("tool_call", { id: "w1", name: "write_file", args: {} }, "builder#2"),
+      ev("approval_requested", { approval_id: "ap", tool_call_id: "w1" }, "builder#2"),
+    ]);
+    expect(waitingApprovals(t).map((i) => i.id)).toEqual(["w1"]);
+    t = [
+      ev("agent_finished", { status: "interrupted" }, "builder#2"),
+      ev("agent_finished", { status: "interrupted" }, "lead"),
+      ev("approval_resolved", { approval_id: "ap", tool_call_id: "w1", action: "approve" }, "builder#2"),
+      ev("run_started", { resumed: true, team: "duo", mode: "delegate" }, null),
+      ev("agent_started", { name: "Lead" }, "lead"),
+      ev("agent_started", { name: "Builder", parent: "lead", tool_call_id: "d1" }, "builder#2"),
+      ev("tool_result", { id: "w1", content: "ok", is_error: false }, "builder#2"),
+    ].reduce(applyEvent, t);
+    expect(t.blocks).toHaveLength(2);
+    expect(delegated(t, "lead", "d1")).toHaveLength(1);
+    expect((delegated(t, "lead", "d1")[0].items[0] as ToolItem).state).toBe("done");
   });
 });

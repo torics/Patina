@@ -7,7 +7,7 @@ use crate::error::{ApiError, ApiResult};
 use crate::state::{AppState, Live, RunHandle};
 use async_trait::async_trait;
 use patina_core::agent::{
-    AgentSpec, Allowlist, ApprovalDecision, CallState, HostError, Outcome, PauseReason, RunCtx, RunHost, Signals, ToolCallInfo, run_agent,
+    AgentSpec, Allowlist, ApprovalDecision, CallState, HostError, Outcome, PauseReason, RunEnv, RunHost, Saved, Signals, ToolCallInfo,
 };
 use patina_core::agent_config::AgentConfig;
 use patina_core::api::{ApprovalAction, ApprovalAnswer, NewRun};
@@ -16,7 +16,9 @@ use patina_core::events::{EventType, RunStatus, new_id, now_ms};
 use patina_core::policy::PolicyMode;
 use patina_core::project_config::ProjectConfig;
 use patina_core::provider::{ChatProvider, Message, Part, Role};
+use patina_core::provider_config::ProviderProfile;
 use patina_core::sandbox::{Sandbox, SandboxLevel};
+use patina_core::team::{self, Member, Roster, Team};
 use patina_core::tool::Tool;
 use patina_store::{Db, approvals, runs as store};
 use patina_tools::command::{Commands, RUN_COMMAND, command_tools};
@@ -176,6 +178,31 @@ impl RunHost for StoreHost {
             .await
             .map_err(host_err)
     }
+
+    async fn waiting_messages(&self) -> Result<bool, HostError> {
+        Ok(store::waiting_steering(&self.db, &self.run_id).await.map_err(host_err)? > 0)
+    }
+
+    async fn load_agent(&self, agent_id: &str) -> Result<Saved, HostError> {
+        let history = store::load_messages(&self.db, &self.run_id, agent_id).await.map_err(host_err)?;
+        let last = store::last_event_of(
+            &self.db,
+            &self.run_id,
+            agent_id,
+            &[EventType::AgentStarted.as_str(), EventType::AgentFinished.as_str()],
+        )
+        .await
+        .map_err(host_err)?;
+        let finished = last.is_some_and(|e| e.kind == EventType::AgentFinished.as_str() && e.payload["status"] == "completed");
+        let resume = call_states(&self.db, &self.run_id, agent_id, &history)
+            .await
+            .map_err(|e| HostError(e.message))?;
+        Ok(Saved { history, resume, finished })
+    }
+
+    async fn agent_ids(&self) -> Result<Vec<String>, HostError> {
+        store::agent_ids(&self.db, &self.run_id).await.map_err(host_err)
+    }
 }
 
 /// Note on an answered approval that the run received it, so the call may have run.
@@ -190,9 +217,10 @@ async fn mark_delivered(db: &Db, approval_id: &str) -> Result<(), patina_store::
 
 /// Everything a run needs, resolved before it starts or resumes.
 struct Plan {
-    spec: AgentSpec,
-    provider: Arc<dyn ChatProvider>,
-    tools: Vec<Arc<dyn Tool>>,
+    /// `agent:<id>` or `team:<id>`, as stored on the run.
+    who: String,
+    team: Team,
+    roster: Roster,
     policy: PolicyMode,
     worktree: Option<PathBuf>,
     repo: Option<PathBuf>,
@@ -203,12 +231,8 @@ struct Plan {
     /// The run's sandbox and its commands. A chat without a project has none.
     commands: Option<Arc<Commands>>,
     allow_commands: Allowlist,
-    /// Set while the agent has not started yet: the worktree still needs its files and setup command.
+    /// Set while no agent has started yet: the worktree still needs its files and setup command.
     prepare: Option<Prepare>,
-    /// The agent's context so far. Empty for a new run, whose prompt is saved when it starts.
-    history: Vec<Message>,
-    /// Where each call of an unfinished last turn stands.
-    resume: Vec<CallState>,
     resumed: bool,
 }
 
@@ -247,6 +271,77 @@ fn spec_of(agent: &AgentConfig, price: Option<patina_core::provider_config::Pric
     }
 }
 
+/// An agent of the run with its provider, resolved before anything is created.
+struct Resolved {
+    config: AgentConfig,
+    profile: ProviderProfile,
+    provider: Arc<dyn ChatProvider>,
+}
+
+/// The team a run executes and every agent it may reach, each with a working provider. `who` is `agent:<id>` or
+/// `team:<id>`. An agent the team names that is missing, or whose provider is, stops the run before it starts.
+async fn resolve(st: &AppState, who: &str, resuming: bool) -> ApiResult<(Team, Vec<Resolved>)> {
+    let gone = |what: String| {
+        if resuming {
+            ApiError::conflict("no_agent", format!("{what} no longer exists, so the run cannot be resumed"))
+        } else {
+            ApiError::bad_request(format!("{what} does not exist"))
+        }
+    };
+    let team = match who.split_once(':') {
+        Some(("team", id)) => {
+            let t = st.get_team(id)?.ok_or_else(|| gone(format!("team {id:?}")))?;
+            Team {
+                mode: t.mode,
+                members: t.members,
+                synthesizer: Some(t.synthesizer).filter(|s| !s.is_empty()),
+            }
+        }
+        Some(("agent", id)) => Team::single(id),
+        _ => Team::single(who),
+    };
+    let agents: HashMap<String, AgentConfig> = st.list_agents()?.into_iter().map(|a| (a.id.clone(), a)).collect();
+    let mut out = vec![];
+    for id in team.reachable(|a| agents.get(a).map(|c| c.can_delegate_to.clone()).unwrap_or_default()) {
+        let Some(config) = agents.get(&id).cloned() else {
+            if team.members.contains(&id) || team.synthesizer.as_deref() == Some(id.as_str()) {
+                return Err(gone(format!("agent {id:?}")));
+            }
+            // A delegation target that is missing is left out; the agents that named it cannot hand it work.
+            continue;
+        };
+        let (profile, provider) = st.provider(&config.provider).await?;
+        out.push(Resolved { config, profile, provider });
+    }
+    Ok((team, out))
+}
+
+/// The roster of a run: each agent with the tools its file names, over the run's workspace and commands.
+fn roster_of(agents: Vec<Resolved>, workspace: Option<(&Arc<Workspace>, &Arc<Commands>)>) -> Roster {
+    let mut roster = Roster::default();
+    for r in agents {
+        let mut tools: Vec<Arc<dyn Tool>> = vec![];
+        if let Some((ws, commands)) = workspace {
+            // An agent sees only the tools named in its `tools` list. `run_command` brings its two helpers.
+            tools = file_tools(ws.clone())
+                .into_iter()
+                .filter(|t| r.config.tools.contains(&t.spec().name))
+                .collect();
+            if r.config.tools.iter().any(|t| t == RUN_COMMAND) {
+                tools.extend(command_tools(commands.clone()));
+            }
+        }
+        roster.insert(Member {
+            spec: spec_of(&r.config, r.profile.prices.get(&r.config.model).cloned()),
+            role: r.config.role.clone(),
+            provider: r.provider,
+            tools,
+            can_delegate_to: r.config.can_delegate_to.clone(),
+        });
+    }
+    roster
+}
+
 /// The sandbox for a run of `project`, as the host can give it now. A backend that was asked for and is missing
 /// is an error; it is never replaced by a weaker one.
 async fn sandbox_for(st: &AppState, project: &ProjectConfig, run_id: &str) -> ApiResult<Arc<dyn Sandbox>> {
@@ -276,10 +371,10 @@ async fn sandbox_for(st: &AppState, project: &ProjectConfig, run_id: &str) -> Ap
     .map_err(sandbox_unavailable)
 }
 
-/// Fill in the parts of a plan that a project run needs: tools, commands, policy and instructions.
+/// Fill in the parts of a plan that a project run needs: commands, policy, instructions, and every agent's tools.
 fn equip(
     plan: &mut Plan,
-    agent: &AgentConfig,
+    agents: Vec<Resolved>,
     project: &ProjectConfig,
     worktree: &Path,
     sandbox: Arc<dyn Sandbox>,
@@ -287,14 +382,7 @@ fn equip(
 ) -> ApiResult<()> {
     let ws = Arc::new(Workspace::new(worktree).map_err(ApiError::internal)?);
     let commands = Commands::new(sandbox, run_id);
-    // The agent sees only the tools named in its `tools` list. `run_command` brings its two helpers.
-    plan.tools = file_tools(ws)
-        .into_iter()
-        .filter(|t| agent.tools.contains(&t.spec().name))
-        .collect();
-    if agent.tools.iter().any(|t| t == RUN_COMMAND) {
-        plan.tools.extend(command_tools(commands.clone()));
-    }
+    plan.roster = roster_of(agents, Some((&ws, &commands)));
     plan.policy = project.policy;
     plan.allow_commands = Arc::new(RwLock::new(project.allow_commands.clone()));
     plan.commands = Some(commands);
@@ -302,6 +390,34 @@ fn equip(
     plan.worktree = Some(worktree.to_path_buf());
     plan.repo = Some(PathBuf::from(&project.path));
     Ok(())
+}
+
+/// What a new run executes, as stored on the run: `team:<id>` or `agent:<id>`.
+fn who_of(input: &NewRun) -> ApiResult<String> {
+    match (input.team_id.as_deref().filter(|t| !t.is_empty()), input.agent_id.as_str()) {
+        (Some(_), a) if !a.is_empty() => Err(ApiError::bad_request("give an agent or a team, not both")),
+        (Some(t), _) => Ok(format!("team:{t}")),
+        (None, "") => Err(ApiError::bad_request("give an agent or a team to run")),
+        (None, a) => Ok(format!("agent:{a}")),
+    }
+}
+
+fn empty_plan(who: String, team: Team, prompt: String, resumed: bool) -> Plan {
+    Plan {
+        who,
+        team,
+        roster: Roster::default(),
+        policy: PolicyMode::ConfirmAll,
+        worktree: None,
+        repo: None,
+        project_instructions: None,
+        prompt,
+        dirty_checkout: false,
+        commands: None,
+        allow_commands: Allowlist::default(),
+        prepare: None,
+        resumed,
+    }
 }
 
 fn new_handle(budget: BudgetTracker, allow_commands: Allowlist) -> Arc<RunHandle> {
@@ -316,15 +432,13 @@ fn new_handle(budget: BudgetTracker, allow_commands: Allowlist) -> Arc<RunHandle
     })
 }
 
-/// Create the run, its worktree and its budgets, then start the agent loop as a task.
+/// Create the run, its worktree and its budgets, then start its agents as a task.
 pub async fn start_run(st: &Arc<AppState>, input: NewRun) -> ApiResult<(store::RunRow, Arc<RunHandle>)> {
     if input.prompt.trim().is_empty() {
         return Err(ApiError::bad_request("the prompt is empty"));
     }
-    let agent = st
-        .get_agent(&input.agent_id)?
-        .ok_or_else(|| ApiError::bad_request(format!("agent {:?} does not exist", input.agent_id)))?;
-    let (profile, provider) = st.provider(&agent.provider).await?;
+    let who = who_of(&input)?;
+    let (team, agents) = resolve(st, &who, false).await?;
     let project = match input.project_id.as_deref().filter(|p| !p.is_empty()) {
         Some(id) => Some(st.project(id)?),
         None => None,
@@ -336,23 +450,7 @@ pub async fn start_run(st: &Arc<AppState>, input: NewRun) -> ApiResult<(store::R
     let run_id = new_id();
     let project_id = project.as_ref().map(|p| p.id.as_str()).unwrap_or("");
     let budgets_json = serde_json::to_value(&budgets).map_err(ApiError::internal)?;
-    let mut plan = Plan {
-        spec: spec_of(&agent, profile.prices.get(&agent.model).cloned()),
-        provider,
-        tools: vec![],
-        policy: PolicyMode::ConfirmAll,
-        worktree: None,
-        repo: None,
-        project_instructions: None,
-        prompt: input.prompt.clone(),
-        dirty_checkout: false,
-        commands: None,
-        allow_commands: Allowlist::default(),
-        prepare: None,
-        history: vec![],
-        resume: vec![],
-        resumed: false,
-    };
+    let mut plan = empty_plan(who.clone(), team, input.prompt.clone(), false);
     if let Some(project) = &project {
         let repo = PathBuf::from(&project.path);
         if !git::is_repo_root(&repo).await {
@@ -372,24 +470,17 @@ pub async fn start_run(st: &Arc<AppState>, input: NewRun) -> ApiResult<(store::R
             let _ = std::fs::remove_dir_all(&private);
             ApiError::bad_request(e.to_string())
         })?;
-        store::create_run(
-            &st.db,
-            &run_id,
-            project_id,
-            &format!("agent:{}", agent.id),
-            &input.prompt,
-            &budgets_json,
-        )
-        .await?;
+        store::create_run(&st.db, &run_id, project_id, &who, &input.prompt, &budgets_json).await?;
         store::set_worktree(&st.db, &run_id, Some(&worktree.to_string_lossy()), Some(&branch), Some(&base)).await?;
-        equip(&mut plan, &agent, project, &worktree, sandbox, &run_id)?;
+        equip(&mut plan, agents, project, &worktree, sandbox, &run_id)?;
         plan.prepare = Some(Prepare {
             repo,
             copy: project.worktree_copy.clone(),
             setup: project.worktree_setup.clone(),
         });
     } else {
-        store::create_run(&st.db, &run_id, "", &format!("agent:{}", agent.id), &input.prompt, &budgets_json).await?;
+        store::create_run(&st.db, &run_id, "", &who, &input.prompt, &budgets_json).await?;
+        plan.roster = roster_of(agents, None);
     }
 
     let handle = new_handle(BudgetTracker::new(budgets), plan.allow_commands.clone());
@@ -453,12 +544,12 @@ fn decision_of(record: &Value) -> Option<ApprovalDecision> {
 /// Where each tool call of an unfinished last turn stands, read from the event log and the approvals.
 /// Only events after the turn's own `usage` event count: tool call ids repeat between turns with some providers.
 async fn call_states(db: &Db, run_id: &str, agent_id: &str, history: &[Message]) -> ApiResult<Vec<CallState>> {
-    let calls: Vec<String> = match history.last() {
+    let calls: Vec<(String, String)> = match history.last() {
         Some(m) if m.role == Role::Assistant => m
             .parts
             .iter()
             .filter_map(|p| match p {
-                Part::ToolCall { id, .. } => Some(id.clone()),
+                Part::ToolCall { id, name, .. } => Some((id.clone(), name.clone())),
                 _ => None,
             })
             .collect(),
@@ -478,8 +569,10 @@ async fn call_states(db: &Db, run_id: &str, agent_id: &str, history: &[Message])
         .into_iter()
         .filter(|a| a.seq > from && a.tool_call["agent_id"] == agent_id)
         .collect();
+    // Sub-agents that `delegate` calls of this turn started.
+    let subs = store::events_of_kind(db, run_id, EventType::AgentStarted.as_str(), from).await?;
     let mut states = vec![];
-    for id in calls {
+    for (id, name) in calls {
         let event = |kind: &str| events.iter().rev().find(|e| e.kind == kind && e.payload["id"] == id.as_str());
         let state = if let Some(done) = event("tool_result") {
             CallState::Finished {
@@ -515,6 +608,16 @@ async fn call_states(db: &Db, run_id: &str, agent_id: &str, history: &[Message])
                     mark_delivered(db, &a.id).await?;
                     CallState::Decided(decision)
                 }
+            }
+        } else if name == team::DELEGATE && event("tool_call").is_some() {
+            // A sub-agent that had started continues; one that had not is started now.
+            match subs
+                .iter()
+                .find(|e| e.payload["parent"] == agent_id && e.payload["tool_call_id"] == id.as_str())
+                .and_then(|e| e.agent_id.clone())
+            {
+                Some(instance) => CallState::Delegated { instance },
+                None => CallState::Logged,
             }
         } else if event("tool_call").is_some() {
             // It was logged and ran without asking, and never reported back.
@@ -574,44 +677,22 @@ pub async fn resume_run(st: &Arc<AppState>, run_id: &str) -> ApiResult<Arc<RunHa
 }
 
 async fn plan_resume(st: &Arc<AppState>, row: &store::RunRow) -> ApiResult<Plan> {
-    let agent_id = row.team_id.strip_prefix("agent:").unwrap_or(&row.team_id);
-    let agent = st.get_agent(agent_id)?.ok_or_else(|| {
-        ApiError::conflict(
-            "no_agent",
-            format!("agent {agent_id:?} no longer exists, so the run cannot be resumed"),
-        )
-    })?;
-    let (profile, provider) = st.provider(&agent.provider).await?;
-    let history = store::load_messages(&st.db, &row.id, agent_id).await?;
-    let started = store::last_seq_of(&st.db, &row.id, agent_id, EventType::AgentStarted.as_str())
+    let (team, agents) = resolve(st, &row.team_id, true).await?;
+    let started = !store::events_of_kind(&st.db, &row.id, EventType::AgentStarted.as_str(), 0)
         .await?
-        .is_some();
-    let mut plan = Plan {
-        spec: spec_of(&agent, profile.prices.get(&agent.model).cloned()),
-        provider,
-        tools: vec![],
-        policy: PolicyMode::ConfirmAll,
-        worktree: None,
-        repo: None,
-        project_instructions: None,
-        prompt: row.prompt.clone(),
-        dirty_checkout: false,
-        commands: None,
-        allow_commands: Allowlist::default(),
-        prepare: None,
-        resume: vec![],
-        history,
-        resumed: true,
-    };
-    if !row.project_id.is_empty() {
+        .is_empty();
+    let mut plan = empty_plan(row.team_id.clone(), team, row.prompt.clone(), true);
+    if row.project_id.is_empty() {
+        plan.roster = roster_of(agents, None);
+    } else {
         let project = st
             .project(&row.project_id)
             .map_err(|_| ApiError::conflict("no_project", "the run's project no longer exists, so it cannot be resumed"))?;
         let worktree = PathBuf::from(row.worktree_path.as_deref().unwrap_or_default());
         let sandbox = sandbox_for(st, &project, &row.id).await?;
-        equip(&mut plan, &agent, &project, &worktree, sandbox, &row.id)?;
+        equip(&mut plan, agents, &project, &worktree, sandbox, &row.id)?;
         if !started {
-            // The run stopped before its agent started, for example in a failed setup command: prepare again.
+            // The run stopped before any agent started, for example in a failed setup command: prepare again.
             plan.prepare = Some(Prepare {
                 repo: PathBuf::from(&project.path),
                 copy: project.worktree_copy.clone(),
@@ -619,7 +700,6 @@ async fn plan_resume(st: &Arc<AppState>, row: &store::RunRow) -> ApiResult<Plan>
             });
         }
     }
-    plan.resume = call_states(&st.db, &row.id, agent_id, &plan.history).await?;
     Ok(plan)
 }
 
@@ -666,7 +746,7 @@ pub async fn send_message(st: &Arc<AppState>, run_id: &str, text: &str) -> ApiRe
 }
 
 /// The run task. It owns the run from `run_started` to `run_finished` and always records a final status.
-async fn drive(st: Arc<AppState>, run_id: String, mut plan: Plan, handle: Arc<RunHandle>) {
+async fn drive(st: Arc<AppState>, run_id: String, plan: Plan, handle: Arc<RunHandle>) {
     let last_seq = store::last_seq(&st.db, &run_id).await.unwrap_or(0);
     let host = StoreHost {
         db: st.db.clone(),
@@ -683,27 +763,27 @@ async fn drive(st: Arc<AppState>, run_id: String, mut plan: Plan, handle: Arc<Ru
         let db = |e: patina_store::StoreError| e.to_string();
         store::set_owner(&st.db, &run_id, Some(&st.identity)).await.map_err(db)?;
         store::set_status(&st.db, &run_id, RunStatus::Running.as_str()).await.map_err(db)?;
-        let mut started = json!({"prompt": plan.prompt, "agent": plan.spec.id, "policy": plan.policy, "has_workspace": plan.worktree.is_some(),
+        let (agent, team_id) = match plan.who.split_once(':') {
+            Some(("team", t)) => (None, Some(t)),
+            Some((_, a)) => (Some(a), None),
+            None => (Some(plan.who.as_str()), None),
+        };
+        let mut started = json!({"prompt": plan.prompt, "agent": agent, "team": team_id, "mode": plan.team.mode.as_str(),
+               "members": plan.team.members, "synthesizer": plan.team.synthesizer,
+               "policy": plan.policy, "has_workspace": plan.worktree.is_some(),
                "uncommitted_changes_not_included": plan.dirty_checkout,
                "sandbox": level.map(|l| l.as_str()), "sandbox_detail": sandbox.as_ref().map(|s| s.describe())});
         if plan.resumed {
             started["resumed"] = json!(true);
         }
         host.append(None, EventType::RunStarted, started).await.map_err(he)?;
-        if plan.history.is_empty() {
-            let user = Message::user(plan.prompt.clone());
-            host.save_message(&plan.spec.id, 0, &user).await.map_err(he)?;
-            plan.history.push(user);
-        }
         if let (Some(prepare), Some(commands), Some(worktree)) = (&plan.prepare, &plan.commands, &plan.worktree)
             && !prepare_worktree(&host, prepare, commands, worktree, &handle.cancel).await?
         {
             return Ok(Outcome::Cancelled);
         }
-        let ctx = RunCtx {
-            provider: plan.provider.clone(),
+        let env = RunEnv {
             host: &host,
-            tools: plan.tools.clone(),
             policy: plan.policy,
             // Without containment every edit and command is confirmed, whatever the project's policy says.
             sandboxed: level.is_some_and(|l| l != SandboxLevel::None),
@@ -713,15 +793,7 @@ async fn drive(st: Arc<AppState>, run_id: String, mut plan: Plan, handle: Arc<Ru
             cancel: handle.cancel.clone(),
             signals: handle.signals.clone(),
         };
-        let mut resume = std::mem::take(&mut plan.resume);
-        loop {
-            let outcome = run_agent(&plan.spec, &ctx, &mut plan.history, std::mem::take(&mut resume)).await;
-            // A message that arrived just as the agent gave its final answer still gets an answer.
-            if outcome == Outcome::Completed && store::waiting_steering(&st.db, &run_id).await.map_err(db)? > 0 {
-                continue;
-            }
-            return Ok(outcome);
-        }
+        Ok(team::run_team(&plan.team, &plan.roster, env, &plan.prompt).await)
     }
     .await;
     // However the run ended, nothing it started keeps running. Pausing ends background processes too.

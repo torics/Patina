@@ -215,7 +215,7 @@ pub async fn list_agents(State(st): St) -> ApiResult<Json<Vec<AgentConfig>>> {
     Ok(Json(st.list_agents()?))
 }
 
-fn check_agent(st: &AppState, a: &AgentConfig) -> ApiResult<()> {
+pub(crate) fn check_agent(st: &AppState, a: &AgentConfig) -> ApiResult<()> {
     a.validate().map_err(ApiError::bad_request)?;
     if st.providers()?.get(&a.provider).is_none() {
         return Err(ApiError::bad_request(format!("provider {:?} does not exist", a.provider)));
@@ -250,7 +250,17 @@ pub async fn update_agent(State(st): St, Path(id): Path<String>, Json(mut a): Js
 }
 
 pub async fn delete_agent(State(st): St, Path(id): Path<String>) -> ApiResult<Json<Value>> {
-    if !valid_id(&id) || !st.delete_agent(&id)? {
+    if !valid_id(&id) {
+        return Err(ApiError::not_found("agent"));
+    }
+    let using = crate::teams::teams_using(&st, &id)?;
+    if !using.is_empty() {
+        return Err(ApiError::conflict(
+            "in_use",
+            format!("agent {id:?} is in the teams {}; change or delete them first", using.join(", ")),
+        ));
+    }
+    if !st.delete_agent(&id)? {
         return Err(ApiError::not_found("agent"));
     }
     Ok(Json(json!({"ok": true})))

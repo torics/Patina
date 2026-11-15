@@ -1,8 +1,11 @@
 //! Shared by the binary's end-to-end tests: a local OpenAI-compatible endpoint, a git repository and the CLI.
 #![allow(dead_code)]
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 /// Answer each chat request with the next canned SSE body; the last one repeats.
 pub async fn fake_model(bodies: Vec<String>) -> u16 {
@@ -246,4 +249,177 @@ pub fn worktree(s: &Setup) -> PathBuf {
         .collect();
     assert_eq!(all.len(), 1, "expected one worktree: {all:?}");
     all.remove(0)
+}
+
+/// A body that makes the recording model never answer that request.
+pub const HANG: &str = "HANG";
+pub const PASSWORD: &str = "correct horse battery";
+
+/// A model endpoint that answers with the next body, records every request, and on `HANG` never answers.
+pub async fn model(bodies: Vec<String>) -> (u16, Arc<Mutex<Vec<String>>>) {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    let seen = Arc::new(Mutex::new(vec![]));
+    let log = seen.clone();
+    tokio::spawn(async move {
+        let mut held = vec![];
+        for body in bodies {
+            let (mut s, _) = l.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 8192];
+            loop {
+                let got = s.read(&mut tmp).await.unwrap();
+                buf.extend_from_slice(&tmp[..got]);
+                let text = String::from_utf8_lossy(&buf).to_string();
+                if let Some(i) = text.find("\r\n\r\n") {
+                    let len = text[..i]
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap_or(0);
+                    if buf.len() >= i + 4 + len {
+                        log.lock().unwrap().push(text[i + 4..].to_string());
+                        break;
+                    }
+                }
+                if got == 0 {
+                    break;
+                }
+            }
+            if body == HANG {
+                held.push(s);
+                continue;
+            }
+            let resp = format!("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{body}");
+            s.write_all(resp.as_bytes()).await.unwrap();
+            s.shutdown().await.ok();
+        }
+    });
+    (port, seen)
+}
+
+pub struct Daemon {
+    pub child: tokio::process::Child,
+    pub base: String,
+    pub origin: String,
+}
+
+/// Start `patina serve` on a free port. Returns the daemon and, on the first start, the setup token.
+pub async fn serve(s: &Setup) -> (Daemon, Option<String>) {
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_patina"))
+        .args([
+            "serve",
+            "--port",
+            "0",
+            "--config-dir",
+            s.config.to_str().unwrap(),
+            "--data-dir",
+            s.data.to_str().unwrap(),
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let line = lines.next_line().await.unwrap().unwrap();
+    let addr = line.strip_prefix("Patina is running at ").expect(&line).to_string();
+    let mut token = None;
+    if let Ok(Ok(Some(l))) = tokio::time::timeout(Duration::from_millis(500), lines.next_line()).await
+        && l.starts_with("First run")
+    {
+        token = Some(lines.next_line().await.unwrap().unwrap().trim().to_string());
+    }
+    // Keep reading so the daemon never blocks on a full pipe.
+    tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
+    (
+        Daemon {
+            child,
+            base: format!("{addr}/api/v1"),
+            origin: addr,
+        },
+        token,
+    )
+}
+
+pub struct Client {
+    pub http: reqwest::Client,
+    pub cookie: String,
+    pub csrf: String,
+}
+
+impl Client {
+    pub async fn call(&self, d: &Daemon, method: reqwest::Method, path: &str, body: Option<Value>) -> (u16, Value) {
+        let mut r = self
+            .http
+            .request(method.clone(), format!("{}{path}", d.base))
+            .header("cookie", &self.cookie);
+        if method != reqwest::Method::GET {
+            r = r
+                .header("origin", &d.origin)
+                .header("x-patina-csrf", &self.csrf)
+                .json(&body.unwrap_or(json!({})));
+        }
+        let resp = r.send().await.unwrap();
+        let status = resp.status().as_u16();
+        let text = resp.text().await.unwrap();
+        (status, serde_json::from_str(&text).unwrap_or(Value::String(text)))
+    }
+    pub async fn get(&self, d: &Daemon, path: &str) -> Value {
+        let (s, b) = self.call(d, reqwest::Method::GET, path, None).await;
+        assert_eq!(s, 200, "GET {path}: {b}");
+        b
+    }
+    pub async fn post(&self, d: &Daemon, path: &str, body: Value) -> Value {
+        let (s, b) = self.call(d, reqwest::Method::POST, path, Some(body)).await;
+        assert_eq!(s, 200, "POST {path}: {b}");
+        b
+    }
+    pub async fn wait_status(&self, d: &Daemon, run: &str, want: &str) -> Value {
+        let mut last = Value::Null;
+        for _ in 0..500 {
+            last = self.get(d, &format!("/runs/{run}")).await;
+            if last["status"] == want {
+                return last;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("run never reached {want}: {last}");
+    }
+}
+
+pub async fn wait_for(seen: &Arc<Mutex<Vec<String>>>, n: usize) {
+    for _ in 0..500 {
+        if seen.lock().unwrap().len() >= n {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("the model never got request {n}");
+}
+
+/// Set the password with the first start's setup token and return a signed-in client.
+pub async fn sign_in(d: &Daemon, token: Option<String>) -> Client {
+    let http = reqwest::Client::new();
+    let resp = http
+        .post(format!("{}/auth/setup", d.base))
+        .header("origin", &d.origin)
+        .json(&json!({"token": token.expect("a setup token on first start"), "password": PASSWORD}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let cookie = resp.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    let csrf = resp.json::<Value>().await.unwrap()["csrf"].as_str().unwrap().to_string();
+    Client { http, cookie, csrf }
 }

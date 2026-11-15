@@ -88,6 +88,10 @@ fn one_line(v: &Value, max: usize) -> String {
 #[derive(Default)]
 pub struct Printer {
     in_text: bool,
+    /// The run's first agent. Text and tools of other agents (in a team) are labeled with their agent.
+    first_agent: Option<String>,
+    /// The agent whose text is being printed.
+    text_agent: Option<String>,
 }
 
 impl Printer {
@@ -102,28 +106,59 @@ impl Printer {
     pub fn print(&mut self, out: &mut dyn Write, ev: &Event) -> std::io::Result<()> {
         let p = &ev.payload;
         let s = |k: &str| p[k].as_str().unwrap_or("");
+        if self.first_agent.is_none() && ev.agent_id.is_some() {
+            self.first_agent = ev.agent_id.clone();
+        }
+        let label = match &ev.agent_id {
+            Some(a) if Some(a) != self.first_agent.as_ref() => format!(" {a}"),
+            _ => String::new(),
+        };
         if ev.kind == "text" {
+            if self.in_text && self.text_agent != ev.agent_id {
+                self.close_text(out)?;
+            }
+            if !self.in_text && !label.is_empty() {
+                write!(out, "[{}] ", label.trim())?;
+            }
             self.in_text = true;
+            self.text_agent = ev.agent_id.clone();
             write!(out, "{}", s("text"))?;
             return out.flush();
         }
         self.close_text(out)?;
         match ev.kind.as_str() {
+            "run_started" if p["team"].is_string() => writeln!(
+                out,
+                "[run] started team {} ({}), policy {}, sandbox {}",
+                s("team"),
+                s("mode"),
+                s("policy"),
+                p["sandbox"].as_str().unwrap_or("none")
+            )?,
             "run_started" => match p["sandbox"].as_str() {
                 Some(sandbox) => writeln!(out, "[run] started, policy {}, sandbox {sandbox}", s("policy"))?,
                 None => writeln!(out, "[run] started, policy {}", s("policy"))?,
             },
-            "agent_started" => writeln!(
-                out,
-                "[agent {}] model {} on {}",
-                ev.agent_id.as_deref().unwrap_or(""),
-                s("model"),
-                s("provider")
-            )?,
-            "tool_call" => writeln!(out, "[tool] {} {}", s("name"), one_line(&p["args"], 200))?,
+            "agent_started" => match p["parent"].as_str() {
+                Some(parent) => writeln!(
+                    out,
+                    "[agent {}] model {} on {}, delegated by {parent}",
+                    ev.agent_id.as_deref().unwrap_or(""),
+                    s("model"),
+                    s("provider")
+                )?,
+                None => writeln!(
+                    out,
+                    "[agent {}] model {} on {}",
+                    ev.agent_id.as_deref().unwrap_or(""),
+                    s("model"),
+                    s("provider")
+                )?,
+            },
+            "tool_call" => writeln!(out, "[tool{label}] {} {}", s("name"), one_line(&p["args"], 200))?,
             "tool_result" => {
                 let state = if p["is_error"].as_bool().unwrap_or(false) { "error" } else { "ok" };
-                writeln!(out, "[tool] {} {state}: {}", s("name"), one_line(&p["content"], 200))?
+                writeln!(out, "[tool{label}] {} {state}: {}", s("name"), one_line(&p["content"], 200))?
             }
             "approval_resolved" => writeln!(out, "[approval] {}", s("action"))?,
             "checkpoint" => writeln!(out, "[checkpoint] step {}, {}", p["step"], s("summary"))?,
@@ -265,8 +300,11 @@ pub async fn run(paths: Paths, args: RunArgs) -> Result<u8> {
     if args.max_wall_clock_s.is_some() {
         budgets.max_wall_clock_s = args.max_wall_clock_s;
     }
+    // `--team` names a team, or else a single agent.
+    let is_team = st.get_team(&args.team).map_err(api)?.is_some();
     let input = NewRun {
-        agent_id: args.team.clone(),
+        agent_id: if is_team { String::new() } else { args.team.clone() },
+        team_id: is_team.then(|| args.team.clone()),
         prompt: args.prompt.clone(),
         project_id: Some(project.id.clone()),
         budgets: Some(budgets),
@@ -458,6 +496,26 @@ mod tests {
         assert_eq!(
             text,
             "Hello\n[tool] read_file {\"path\":\"a.txt\"}\n[tool] read_file ok: one two\n[run] completed: 2 steps, 10 tokens in, 4 tokens out (estimated), cost unknown\n"
+        );
+
+        // In a team, another agent's text and tools carry its name.
+        let mut out = Vec::new();
+        let mut p = Printer::default();
+        let other = |seq, kind: &str, payload| Event {
+            agent_id: Some("builder#2".into()),
+            ..ev(seq, kind, payload)
+        };
+        for e in [
+            ev(1, "text", json!({"text": "Plan"})),
+            other(2, "text", json!({"text": "Bui"})),
+            other(3, "text", json!({"text": "lt"})),
+            other(4, "tool_call", json!({"name": "write_file", "args": {}})),
+        ] {
+            p.print(&mut out, &e).unwrap();
+        }
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "Plan\n[builder#2] Built\n[tool builder#2] write_file {}\n"
         );
     }
 }

@@ -153,6 +153,15 @@ impl RunHost for Host {
         *self.replaced.lock().unwrap() += 1;
         Ok(())
     }
+    async fn waiting_messages(&self) -> Result<bool, HostError> {
+        Ok(self.inbox.lock().unwrap().front().is_some_and(|m| !m.is_empty()))
+    }
+    async fn load_agent(&self, _: &str) -> Result<Saved, HostError> {
+        Err(HostError("a single agent is not loaded through the host".into()))
+    }
+    async fn agent_ids(&self) -> Result<Vec<String>, HostError> {
+        Ok(vec![])
+    }
 }
 
 impl Host {
@@ -228,10 +237,8 @@ fn spec() -> AgentSpec {
 }
 
 fn ctx<'a>(provider: Arc<Scripted>, host: &'a Host, tools: Vec<Arc<dyn Tool>>) -> RunCtx<'a> {
-    RunCtx {
-        provider,
+    let env = RunEnv {
         host,
-        tools,
         policy: PolicyMode::ConfirmAll,
         sandboxed: false,
         allow_commands: Default::default(),
@@ -239,7 +246,8 @@ fn ctx<'a>(provider: Arc<Scripted>, host: &'a Host, tools: Vec<Arc<dyn Tool>>) -
         project_instructions: None,
         cancel: CancellationToken::new(),
         signals: Default::default(),
-    }
+    };
+    RunCtx::alone(env, provider, tools)
 }
 
 async fn run(c: &RunCtx<'_>) -> (Outcome, Vec<Message>) {
@@ -767,7 +775,11 @@ async fn a_pause_waits_for_the_step_to_finish_and_the_run_continues_when_resumed
     assert_eq!(host.of("agent_finished")[0]["status"], "paused");
     assert_eq!(host.checkpoints.lock().unwrap().len(), 1);
 
-    // Resumed with the same history: the loop goes on with the next model turn.
+    // The flag stays set until the run is resumed, so every agent of a team stops.
+    assert_eq!(run_agent(&spec(), &c, &mut h, vec![]).await, Outcome::Paused(PauseReason::Owner));
+    assert_eq!(p.requests.lock().unwrap().len(), 1);
+    // Resumed with the same history and a fresh flag: the loop goes on with the next model turn.
+    c.signals = Default::default();
     assert_eq!(run_agent(&spec(), &c, &mut h, vec![]).await, Outcome::Completed);
     assert_eq!(p.requests.lock().unwrap().len(), 2);
     assert_eq!(c.budget.usage().steps, 2);

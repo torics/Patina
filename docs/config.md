@@ -38,6 +38,7 @@ A `secret:` reference points at a key stored encrypted in the database; set it i
 schema_version = 1
 id = "assistant"
 name = "Assistant"
+role = "Answers questions about the project"   # optional
 provider = "home-ollama"
 model = "some-model-id"
 system_prompt = ""
@@ -49,6 +50,26 @@ can_delegate_to = []
 ```
 
 `tools` lists what the agent may use in a run that has a project: `list_files`, `read_file`, `search`, `edit_file`, `write_file`, `run_command`. `run_command` brings `process_output` and `stop_process` for background processes. An empty list means the agent can only talk.
+
+`role` (optional) is one line that other agents see: in the `delegate` tool's list and in hand-offs. `can_delegate_to` names agents this one may hand tasks to with the `delegate` tool (see teams below).
+
+## teams/<id>.toml
+
+```toml
+schema_version = 1
+id = "plan-build-review"
+name = "Plan, build, review"   # optional, defaults to the id
+mode = "sequential"            # single | delegate | sequential | parallel
+members = ["planner", "builder", "reviewer"]
+synthesizer = ""               # required when mode is parallel, and not one of the members
+```
+
+- `single`: exactly one member.
+- `delegate`: the first member leads. It may delegate to the agents its `can_delegate_to` names, or else to the other members.
+- `sequential`: members run in order.
+- `parallel`: members run at once with read tools only; the synthesizer then gets every answer.
+
+An exported team is the same table under `[team]`, followed by one `[[agent]]` table per agent the team can reach, in the format above.
 
 ## projects.toml
 

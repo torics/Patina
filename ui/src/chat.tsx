@@ -1,10 +1,11 @@
+import type { ComponentChildren } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import type { Budgets } from "./api/generated/Budgets";
 import { api } from "./api";
 import { Changes } from "./changes";
-import { isActive, type AgentBlock, type ToolItem } from "./reducer";
+import { delegated, isActive, topBlocks, type AgentBlock, type ToolItem } from "./reducer";
 import { patternMatches, suggestPattern } from "./policy";
-import { agents, closeRun, continueRun, openRun, projects, report, runs, selectedRun, startRun, timeline } from "./state";
+import { agents, closeRun, continueRun, openRun, projects, report, runs, selectedRun, startRun, teams, timeline } from "./state";
 
 const DEFAULTS = { steps: "50", tokens: "2000000", cost: "", minutes: "120" };
 
@@ -14,13 +15,23 @@ function positive(text: string): number | null {
   return text.trim() !== "" && Number.isFinite(n) && n > 0 ? n : null;
 }
 
+const MODE_LABEL: Record<string, string> = {
+  single: "one agent",
+  delegate: "a lead that hands tasks to the others",
+  sequential: "one after another",
+  parallel: "at once, then a synthesizer",
+};
+
 function Composer() {
-  const [agent, setAgent] = useState(agents.value[0]?.id ?? "");
+  // `team:<id>` or `agent:<id>`. A team is offered first when there is one.
+  const [who, setWho] = useState(teams.value[0] ? `team:${teams.value[0].id}` : agents.value[0] ? `agent:${agents.value[0].id}` : "");
   const [project, setProject] = useState("");
   const [prompt, setPrompt] = useState("");
   const [limits, setLimits] = useState(DEFAULTS);
   const [busy, setBusy] = useState(false);
-  const chosen = agents.value.find((a) => a.id === agent) ?? agents.value[0];
+  const team = teams.value.find((t) => `team:${t.id}` === who);
+  const chosen = team ? undefined : agents.value.find((a) => `agent:${a.id}` === who);
+  const ready = Boolean(team || chosen);
   const picked = projects.value.find((p) => p.id === project);
   const steps = positive(limits.steps);
   const tokens = positive(limits.tokens);
@@ -32,7 +43,7 @@ function Composer() {
     try {
       const minutes = positive(limits.minutes);
       const budgets: Budgets = { max_steps: Math.floor(steps!), max_tokens: Math.floor(tokens!), max_cost_usd: positive(limits.cost), max_wall_clock_s: minutes === null ? null : Math.round(minutes * 60) };
-      await startRun(chosen.id, prompt, project || null, budgets);
+      await startRun(who, prompt, project || null, budgets);
       setPrompt("");
     } catch (err) {
       report(err);
@@ -48,15 +59,33 @@ function Composer() {
   return (
     <form class="composer" onSubmit={submit}>
       <label>
-        Agent
-        <select name="agent" value={agent} onChange={(e) => setAgent(e.currentTarget.value)}>
-          {agents.value.map((a) => (
-            <option value={a.id}>
-              {a.name} ({a.model})
-            </option>
-          ))}
+        Team or agent
+        <select name="agent" value={who} onChange={(e) => setWho(e.currentTarget.value)}>
+          {teams.value.length > 0 && (
+            <optgroup label="Teams">
+              {teams.value.map((t) => (
+                <option value={`team:${t.id}`}>
+                  {t.name || t.id} ({t.mode})
+                </option>
+              ))}
+            </optgroup>
+          )}
+          <optgroup label="Agents">
+            {agents.value.map((a) => (
+              <option value={`agent:${a.id}`}>
+                {a.name} ({a.model})
+              </option>
+            ))}
+          </optgroup>
         </select>
       </label>
+      {team && (
+        <p class="muted">
+          {team.members.length} agents working {MODE_LABEL[team.mode] ?? team.mode}: {team.members.join(", ")}
+          {team.synthesizer ? `, then ${team.synthesizer}` : ""}. They share the run's limits.
+          {team.mode === "parallel" ? " Your messages reach the synthesizer." : ""}
+        </p>
+      )}
       <label>
         Project
         <select name="project" value={project} onChange={(e) => setProject(e.currentTarget.value)}>
@@ -109,7 +138,7 @@ function Composer() {
         </div>
         {!valid && <p class="error">Steps and tokens must be numbers above zero. Cost and minutes must be numbers above zero or empty.</p>}
       </details>
-      <button type="submit" disabled={busy || !prompt.trim() || !valid}>
+      <button type="submit" disabled={busy || !prompt.trim() || !valid || !ready}>
         Send
       </button>
     </form>
@@ -191,8 +220,9 @@ function ApprovalCard({ runId, item }: { runId: string; item: ToolItem }) {
 
 const STATE_LABEL: Record<ToolItem["state"], string> = { running: "running", waiting: "needs approval", done: "done", failed: "failed", denied: "denied" };
 
-function ToolCard({ runId, item }: { runId: string; item: ToolItem }) {
-  const target = [item.args.command, item.args.path, item.args.pattern, item.args.id].find((v) => typeof v === "string") ?? (Array.isArray(item.args.paths) ? item.args.paths.join(", ") : "");
+function ToolCard({ runId, item, children }: { runId: string; item: ToolItem; children?: ComponentChildren }) {
+  const target =
+    [item.args.command, item.args.path, item.args.pattern, item.args.id, item.args.agent].find((v) => typeof v === "string") ?? (Array.isArray(item.args.paths) ? item.args.paths.join(", ") : "");
   const answered = item.approval && item.approval.state !== "pending";
   return (
     <div class={`tool ${item.state}`}>
@@ -211,7 +241,9 @@ function ToolCard({ runId, item }: { runId: string; item: ToolItem }) {
           {item.approval!.state === "expired" && "The run ended before this was answered."}
         </p>
       )}
-      {!item.diff && (
+      {item.name === "delegate" && typeof item.args.task === "string" && <p class="task">{item.args.task}</p>}
+      {children}
+      {!item.diff && item.name !== "delegate" && (
         <details>
           <summary>Arguments</summary>
           <pre>{JSON.stringify(item.args, null, 2)}</pre>
@@ -228,12 +260,13 @@ function ToolCard({ runId, item }: { runId: string; item: ToolItem }) {
   );
 }
 
-function Block({ runId, b }: { runId: string; b: AgentBlock }) {
+function Block({ runId, b, nested = false }: { runId: string; b: AgentBlock; nested?: boolean }) {
+  const t = timeline.value;
   // Live text continues the paragraph it belongs to, so a sentence never breaks where a batch was saved.
   const last = b.items[b.items.length - 1];
   const joinTail = last?.kind === "text" && !last.discarded;
   return (
-    <article class="bubble agent">
+    <article class={nested ? "bubble agent sub" : "bubble agent"} aria-label={nested ? `Sub-agent ${b.name}` : undefined}>
       <h3>
         {b.name} <small>{b.model}{b.finishedAt ? ` · ${((b.finishedAt - b.startedAt) / 1000).toFixed(1)} s` : ""}</small>
       </h3>
@@ -242,7 +275,12 @@ function Block({ runId, b }: { runId: string; b: AgentBlock }) {
       ))}
       {b.items.map((i, idx) => {
         if (i.kind === "text") return i.discarded ? null : <div class="text">{i.text + (joinTail && idx === b.items.length - 1 ? b.pending : "")}</div>;
-        if (i.kind === "tool") return <ToolCard key={i.id} runId={runId} item={i} />;
+        if (i.kind === "tool")
+          return (
+            <ToolCard key={i.id} runId={runId} item={i}>
+              {i.name === "delegate" && delegated(t, b.agentId, i.id).map((sub) => <Block runId={runId} b={sub} nested />)}
+            </ToolCard>
+          );
         if (i.kind === "message")
           return (
             <div class="bubble user steer">
@@ -414,6 +452,11 @@ function Timeline() {
       )}
       {(live || t.status === "budget_exceeded") && run && <LimitsEditor key={id} runId={id} budgets={run.budgets} />}
       {t.dirtyCheckout && <p class="warn">Your checkout had uncommitted changes when this run started. The run works from the last commit and does not include them.</p>}
+      {t.team && (
+        <p class="muted">
+          Team {t.team}, {MODE_LABEL[t.mode ?? ""] ?? t.mode}.
+        </p>
+      )}
       {t.prompt && <div class="bubble user">{t.prompt}</div>}
       {t.setup.length > 0 && (
         <article class="bubble agent" aria-label="Preparing the worktree">
@@ -426,7 +469,7 @@ function Timeline() {
         </article>
       )}
       <div aria-live="polite">
-        {t.blocks.map((b) => (
+        {topBlocks(t).map((b) => (
           <Block runId={id} b={b} />
         ))}
       </div>
@@ -452,7 +495,7 @@ export function Chat() {
               <button class={r.id === selectedRun.value ? "run on" : "run"} onClick={() => openRun(r.id)}>
                 <span>{r.prompt.slice(0, 60)}</span>
                 <small>
-                  {r.agent_id}
+                  {r.team_id ? `team ${r.team_id}` : r.agent_id}
                   {r.project_id ? ` in ${r.project_id}` : ""} · {r.status.replace("_", " ")}
                 </small>
               </button>

@@ -28,7 +28,12 @@ pub fn view(st: &AppState, r: store::RunRow) -> RunView {
     RunView {
         can_resume,
         pruned: r.pruned_at.is_some(),
-        agent_id: r.team_id.strip_prefix("agent:").unwrap_or(&r.team_id).to_string(),
+        agent_id: match r.team_id.split_once(':') {
+            Some(("team", _)) => String::new(),
+            Some((_, a)) => a.to_string(),
+            None => r.team_id.clone(),
+        },
+        team_id: r.team_id.strip_prefix("team:").map(str::to_string),
         budgets: engine::budgets_of(&r),
         usage: live.unwrap_or_else(|| serde_json::from_value(r.usage.clone()).unwrap_or_default()),
         has_worktree: r.worktree_path.is_some(),

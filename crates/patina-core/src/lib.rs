@@ -14,6 +14,9 @@ pub mod project_config;
 pub mod provider;
 pub mod provider_config;
 pub mod sandbox;
+pub mod team;
+pub mod team_config;
+pub mod team_templates;
 pub mod tool;
 
 pub use config::{Config, ConfigError};

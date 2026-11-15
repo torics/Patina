@@ -5,6 +5,7 @@ use crate::policy::PolicyMode;
 use crate::project_config::ProjectConfig;
 use crate::provider_config::{Price, ProviderKind};
 use crate::sandbox::{SandboxLevel, SandboxStatus};
+use crate::team_config::TeamMode;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use ts_rs::TS;
@@ -85,7 +86,10 @@ pub struct RunView {
     pub id: String,
     /// Empty for a plain chat with no project.
     pub project_id: String,
+    /// The agent of a one-agent run; empty for a team run.
     pub agent_id: String,
+    /// The team of a team run.
+    pub team_id: Option<String>,
     pub prompt: String,
     pub status: String,
     pub budgets: Budgets,
@@ -115,7 +119,12 @@ pub struct RunMessage {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct NewRun {
+    /// Run one agent. Give this or `team_id`.
+    #[serde(default)]
     pub agent_id: String,
+    /// Run a team.
+    #[serde(default)]
+    pub team_id: Option<String>,
     pub prompt: String,
     /// Run inside this project's worktree with the agent's tools. Without it, the run is a plain chat.
     #[serde(default)]
@@ -267,4 +276,73 @@ pub struct SystemInfo {
 #[ts(export)]
 pub struct SecretInput {
     pub value: String,
+}
+
+/// A provider and model, chosen for an agent of a template.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ModelChoice {
+    pub provider: String,
+    pub model: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TemplateAgentView {
+    /// The agent's id in the template. The created agent is named `<team id>-<this id>`.
+    pub id: String,
+    pub name: String,
+    pub role: String,
+    pub tools: Vec<String>,
+}
+
+/// A built-in team. It names no provider or model: the owner picks them when creating the team.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TemplateView {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub mode: TeamMode,
+    pub agents: Vec<TemplateAgentView>,
+    /// Agents that should each get a different model for the template to make sense.
+    pub distinct_models: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TemplateInput {
+    /// The new team's id. Defaults to the template's id.
+    #[serde(default)]
+    pub team_id: Option<String>,
+    /// The provider and model every agent uses unless `models` names another for it.
+    pub provider: String,
+    pub model: String,
+    /// By template agent id.
+    #[serde(default)]
+    pub models: BTreeMap<String, ModelChoice>,
+    /// Replace a team or agents with the same ids.
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TeamImport {
+    /// The exported file: a `[team]` table and one `[[agent]]` table per agent.
+    pub bundle: String,
+    /// Use this provider for every agent whose provider does not exist here.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Replace a team or agents with the same ids that differ from the file.
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TeamImported {
+    pub team: crate::team_config::TeamConfig,
+    /// Agents written from the file. Agents identical to the file are left alone and not listed.
+    pub agents_written: Vec<String>,
 }

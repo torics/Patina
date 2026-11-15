@@ -7,9 +7,12 @@ import type { SandboxChoice } from "./api/generated/SandboxChoice";
 import type { ProviderKind } from "./api/generated/ProviderKind";
 import type { ProviderTestResult } from "./api/generated/ProviderTestResult";
 import type { ProviderView } from "./api/generated/ProviderView";
+import type { TeamConfig } from "./api/generated/TeamConfig";
+import type { TeamMode } from "./api/generated/TeamMode";
+import type { TemplateView } from "./api/generated/TemplateView";
 import { api, ApiError } from "./api";
 import { lines, looksLikeCredentials, parseEnv } from "./policy";
-import { agents, projects, providers, refresh, report, retentionDays, sandbox, toolNames, view } from "./state";
+import { agents, projects, providers, refresh, report, retentionDays, sandbox, teams, templates, toolNames, view } from "./state";
 
 const KINDS: ProviderKind[] = ["openai_compatible", "openai", "anthropic", "gemini", "ollama"];
 
@@ -173,6 +176,9 @@ function AgentForm({ existing, onDone }: { existing?: AgentConfig; onDone: () =>
   const [model, setModel] = useState(existing?.model ?? "");
   const [models, setModels] = useState<string[]>([]);
   const [system, setSystem] = useState(existing?.system_prompt ?? "");
+  const [role, setRole] = useState(existing?.role ?? "");
+  const [delegates, setDelegates] = useState<string[]>(existing?.can_delegate_to ?? []);
+  const others = agents.value.filter((a) => a.id !== existing?.id);
   // A new agent starts with every tool; tools only do anything in a run that has a project.
   const [tools, setTools] = useState<string[]>(existing?.tools ?? toolNames.value);
   const [error, setError] = useState<string | null>(null);
@@ -184,7 +190,15 @@ function AgentForm({ existing, onDone }: { existing?: AgentConfig; onDone: () =>
     e.preventDefault();
     setError(null);
     try {
-      const fields = { name, provider, model: model.trim(), system_prompt: system, tools: toolNames.value.filter((t) => tools.includes(t)) };
+      const fields = {
+        name,
+        role,
+        provider,
+        model: model.trim(),
+        system_prompt: system,
+        tools: toolNames.value.filter((t) => tools.includes(t)),
+        can_delegate_to: others.map((a) => a.id).filter((id) => delegates.includes(id)),
+      };
       if (existing) await api.updateAgent({ ...existing, ...fields });
       else await api.createAgent({ id: slug(name), ...fields });
       await refresh();
@@ -218,9 +232,24 @@ function AgentForm({ existing, onDone }: { existing?: AgentConfig; onDone: () =>
         </datalist>
       </label>
       <label>
+        Role (optional; other agents of a team see it)
+        <input name="role" value={role} onInput={(e) => setRole(e.currentTarget.value)} />
+      </label>
+      <label>
         System prompt (optional)
         <textarea name="system" rows={3} value={system} onInput={(e) => setSystem(e.currentTarget.value)} />
       </label>
+      {others.length > 0 && (
+        <fieldset>
+          <legend>Agents it may hand tasks to (with the delegate tool)</legend>
+          {others.map((a) => (
+            <label class="check">
+              <input type="checkbox" checked={delegates.includes(a.id)} onChange={(e) => setDelegates(e.currentTarget.checked ? [...delegates, a.id] : delegates.filter((x) => x !== a.id))} />
+              {a.name}
+            </label>
+          ))}
+        </fieldset>
+      )}
       <fieldset>
         <legend>Tools the agent may use in a project</legend>
         {toolNames.value.map((t) => (
@@ -531,6 +560,280 @@ function ProjectRow({ p }: { p: ProjectView }) {
   );
 }
 
+
+const MODES: { value: TeamMode; label: string }[] = [
+  { value: "single", label: "Single: one agent" },
+  { value: "delegate", label: "Delegate: the first member leads and hands tasks to the others" },
+  { value: "sequential", label: "Sequential: members work one after another" },
+  { value: "parallel", label: "Parallel: members answer at once without changing files, then a synthesizer" },
+];
+
+/** A provider and model picker, with the models the provider offers when it lists them. */
+function ModelPicker({ label, provider, model, onChange }: { label: string; provider: string; model: string; onChange: (provider: string, model: string) => void }) {
+  const [models, setModels] = useState<string[]>([]);
+  useEffect(() => {
+    setModels([]);
+    if (provider) api.models(provider).then(setModels).catch(() => setModels([]));
+  }, [provider]);
+  const listId = `models-${label.replace(/[^a-z0-9]/gi, "")}`;
+  return (
+    <div class="grid">
+      <label>
+        {label}: provider
+        <select value={provider} onChange={(e) => onChange(e.currentTarget.value, model)} required>
+          {providers.value.map((p) => (
+            <option value={p.id}>{p.id}</option>
+          ))}
+        </select>
+      </label>
+      <label>
+        {label}: model id
+        <input value={model} onInput={(e) => onChange(provider, e.currentTarget.value)} list={listId} required />
+        <datalist id={listId}>
+          {models.map((m) => (
+            <option value={m} />
+          ))}
+        </datalist>
+      </label>
+    </div>
+  );
+}
+
+function TemplateForm({ onDone }: { onDone: () => void }) {
+  const [id, setId] = useState(templates.value[0]?.id ?? "");
+  const t: TemplateView | undefined = templates.value.find((x) => x.id === id);
+  const [teamId, setTeamId] = useState("");
+  const [choice, setChoice] = useState({ provider: providers.value[0]?.id ?? "", model: "" });
+  const [own, setOwn] = useState<Record<string, { provider: string; model: string }>>({});
+  const [conflict, setConflict] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  async function save(e: Event, overwrite = false) {
+    e.preventDefault();
+    setError(null);
+    try {
+      const models = Object.fromEntries(Object.entries(own).filter(([k, v]) => t?.distinct_models.includes(k) && v.model.trim()));
+      await api.fromTemplate(id, { team_id: teamId.trim() || null, provider: choice.provider, model: choice.model.trim(), models, overwrite });
+      await refresh();
+      onDone();
+    } catch (err) {
+      if (err instanceof ApiError && err.code === "exists") setConflict(err.message);
+      else setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+  return (
+    <form class="card" onSubmit={(e) => save(e)}>
+      <h3>Make a team from a template</h3>
+      <label>
+        Template
+        <select name="template" value={id} onChange={(e) => (setId(e.currentTarget.value), setConflict(null))}>
+          {templates.value.map((x) => (
+            <option value={x.id}>{x.name}</option>
+          ))}
+        </select>
+      </label>
+      {t && (
+        <p class="muted">
+          {t.description} Agents: {t.agents.map((a) => `${a.name} (${a.role.toLowerCase()})`).join("; ")}.
+        </p>
+      )}
+      <label>
+        Team id (optional; the agents are named after it)
+        <input name="team_id" value={teamId} placeholder={id} onInput={(e) => setTeamId(slug(e.currentTarget.value))} />
+      </label>
+      <ModelPicker label="Every agent" provider={choice.provider} model={choice.model} onChange={(provider, model) => setChoice({ provider, model })} />
+      {t?.distinct_models.map((agent) => {
+        const name = t.agents.find((a) => a.id === agent)?.name ?? agent;
+        const v = own[agent] ?? { provider: choice.provider, model: "" };
+        return <ModelPicker label={name} provider={v.provider} model={v.model} onChange={(provider, model) => setOwn({ ...own, [agent]: { provider, model } })} />;
+      })}
+      {t && t.distinct_models.length > 0 && <p class="muted">Give these agents different models; that is what the template compares. Left empty, an agent uses the model above.</p>}
+      {conflict && (
+        <div class="warn">
+          <p>{conflict}</p>
+          <button type="button" class="danger" onClick={(e) => save(e, true)}>
+            Replace them
+          </button>
+        </div>
+      )}
+      {error && <p class="error">{error}</p>}
+      <div class="row">
+        <button type="submit">Create team</button>
+        <button type="button" class="link" onClick={onDone}>
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
+function TeamForm({ existing, onDone }: { existing?: TeamConfig; onDone: () => void }) {
+  const [name, setName] = useState(existing?.name ?? "");
+  const [mode, setMode] = useState<TeamMode>(existing?.mode ?? "sequential");
+  const [members, setMembers] = useState(existing?.members.join(", ") ?? "");
+  const [synthesizer, setSynthesizer] = useState(existing?.synthesizer ?? "");
+  const [error, setError] = useState<string | null>(null);
+  async function save(e: Event) {
+    e.preventDefault();
+    setError(null);
+    const list = members.split(",").map((m) => m.trim()).filter(Boolean);
+    const team: TeamConfig = { schema_version: 1, id: existing?.id ?? slug(name), name, mode, members: list, synthesizer: mode === "parallel" ? synthesizer : "" };
+    try {
+      if (existing) await api.updateTeam(team);
+      else await api.createTeam(team);
+      await refresh();
+      onDone();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+  return (
+    <form class="card" onSubmit={save}>
+      <h3>{existing ? `Edit ${existing.name || existing.id}` : "Add a team"}</h3>
+      <label>
+        Name
+        <input name="team_name" value={name} onInput={(e) => setName(e.currentTarget.value)} required />
+      </label>
+      <label>
+        Mode
+        <select name="mode" value={mode} onChange={(e) => setMode(e.currentTarget.value as TeamMode)}>
+          {MODES.map((m) => (
+            <option value={m.value}>{m.label}</option>
+          ))}
+        </select>
+      </label>
+      <label>
+        Members, in order, as agent ids separated by commas
+        <input name="members" value={members} onInput={(e) => setMembers(e.currentTarget.value)} required />
+      </label>
+      <p class="muted">Agents: {agents.value.map((a) => a.id).join(", ")}</p>
+      {mode === "parallel" && (
+        <label>
+          Synthesizer (not a member; it gets every member's answer)
+          <select name="synthesizer" value={synthesizer} onChange={(e) => setSynthesizer(e.currentTarget.value)} required>
+            <option value="">Choose an agent</option>
+            {agents.value.map((a) => (
+              <option value={a.id}>{a.name}</option>
+            ))}
+          </select>
+        </label>
+      )}
+      {error && <p class="error">{error}</p>}
+      <div class="row">
+        <button type="submit">Save</button>
+        <button type="button" class="link" onClick={onDone}>
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
+function ImportForm({ onDone }: { onDone: () => void }) {
+  const [bundle, setBundle] = useState("");
+  const [provider, setProvider] = useState("");
+  const [conflict, setConflict] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  async function save(e: Event, overwrite = false) {
+    e.preventDefault();
+    setError(null);
+    try {
+      await api.importTeam({ bundle, provider: provider || null, overwrite });
+      await refresh();
+      onDone();
+    } catch (err) {
+      if (err instanceof ApiError && err.code === "exists") setConflict(err.message);
+      else setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+  return (
+    <form class="card" onSubmit={(e) => save(e)}>
+      <h3>Import a team</h3>
+      <label>
+        Team file
+        <input type="file" accept=".toml,text/plain" onChange={(e) => e.currentTarget.files?.[0]?.text().then(setBundle)} />
+      </label>
+      <label>
+        Or paste it
+        <textarea name="bundle" rows={6} value={bundle} onInput={(e) => setBundle(e.currentTarget.value)} required />
+      </label>
+      <label>
+        Provider for agents whose provider does not exist here
+        <select name="import_provider" value={provider} onChange={(e) => setProvider(e.currentTarget.value)}>
+          <option value="">None: refuse such agents</option>
+          {providers.value.map((p) => (
+            <option value={p.id}>{p.id}</option>
+          ))}
+        </select>
+      </label>
+      {conflict && (
+        <div class="warn">
+          <p>{conflict}</p>
+          <button type="button" class="danger" onClick={(e) => save(e, true)}>
+            Replace them
+          </button>
+        </div>
+      )}
+      {error && <p class="error">{error}</p>}
+      <div class="row">
+        <button type="submit">Import</button>
+        <button type="button" class="link" onClick={onDone}>
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
+function TeamRow({ t }: { t: TeamConfig }) {
+  const [editing, setEditing] = useState(false);
+  if (editing) return <TeamForm existing={t} onDone={() => setEditing(false)} />;
+  const label = t.name || t.id;
+  return (
+    <li class="card row">
+      <strong>{label}</strong>
+      <span class="muted">
+        {t.mode} · {t.members.join(", ")}
+        {t.synthesizer ? ` · synthesizer ${t.synthesizer}` : ""}
+      </span>
+      <button class="link" onClick={() => setEditing(true)} aria-label={`Edit ${label}`}>
+        Edit
+      </button>
+      <a class="link" href={api.exportTeamUrl(t.id)} download={`team-${t.id}.toml`} aria-label={`Export ${label}`}>
+        Export
+      </a>
+      <button class="link danger" aria-label={`Delete ${label}`} onClick={() => api.deleteTeam(t.id).then(refresh).catch(report)}>
+        Delete
+      </button>
+    </li>
+  );
+}
+
+function TeamsSection() {
+  const [adding, setAdding] = useState<"template" | "team" | "import" | null>(null);
+  const done = () => setAdding(null);
+  return (
+    <section>
+      <h2>Teams</h2>
+      <p class="muted">A team runs several agents on one prompt, each with its own model. They share the run's limits and see only each other's final messages.</p>
+      <ul class="list">
+        {teams.value.map((t) => (
+          <TeamRow key={t.id} t={t} />
+        ))}
+      </ul>
+      {adding === "template" && <TemplateForm onDone={done} />}
+      {adding === "team" && <TeamForm onDone={done} />}
+      {adding === "import" && <ImportForm onDone={done} />}
+      {adding === null && (
+        <div class="row">
+          <button onClick={() => setAdding("template")}>Team from a template</button>
+          {agents.value.length > 0 && <button onClick={() => setAdding("team")}>Add team</button>}
+          <button onClick={() => setAdding("import")}>Import team</button>
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function Settings() {
   const [addingProvider, setAddingProvider] = useState(false);
   const [addingAgent, setAddingAgent] = useState(false);
@@ -546,7 +849,7 @@ export function Settings() {
       {(noProviders || noAgents) && (
         <ol class="card steps">
           <li class={noProviders ? "current" : "done"}>Add a provider and test the connection.</li>
-          <li class={noProviders ? "" : noAgents ? "current" : "done"}>Add an agent that uses it.</li>
+          <li class={noProviders ? "" : noAgents ? "current" : "done"}>Add an agent that uses it, or make a team from a template.</li>
           <li>Open Chat and send a prompt.</li>
         </ol>
       )}
@@ -579,6 +882,7 @@ export function Settings() {
           )}
         </section>
       )}
+      {!noProviders && <TeamsSection />}
       {!noAgents && (
         <section>
           <h2>Projects</h2>

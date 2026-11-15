@@ -1,7 +1,8 @@
 // Smoke tests against the real binary: set up, add a provider and agent, chat, reload and replay; run an agent in
 // a project, approve its edit after reading the diff, and merge the result; then let an agent run a command in
-// the sandbox and put the command on the project's allowlist; and pause an agent that repeats itself, resume it,
-// and send it a message.
+// the sandbox and put the command on the project's allowlist; pause an agent that repeats itself, resume it,
+// and send it a message; and make teams from a template and by hand, run them, and see a sub-agent nested under
+// the call that started it.
 import { expect, test } from "@playwright/test";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -41,6 +42,24 @@ test.beforeAll(async () => {
       const usage = { prompt_tokens: 5, completion_tokens: 5, total_tokens: 10 };
       const messages: { role: string }[] = body.messages ?? [];
       const answered = messages.some((m) => m.role === "tool");
+      const all = JSON.stringify(messages);
+      if (all.includes("Plan and build")) {
+        // Team runs: each agent answers by its role, which its system prompt states.
+        const reply = (text: string) => {
+          res.write(chunk({ content: text }, null));
+          res.end(chunk({}, "stop", usage) + "data: [DONE]\n\n");
+        };
+        if (body.tools?.some((t: any) => t.function?.name === "delegate")) {
+          if (answered) return reply("The builder is done.");
+          const args = JSON.stringify({ agent: "plan-build-review-builder", task: "Plan and build: the build part" });
+          res.write(chunk({ tool_calls: [{ index: 0, id: "call_d", type: "function", function: { name: "delegate", arguments: args } }] }, null));
+          res.end(chunk({}, "tool_calls", usage) + "data: [DONE]\n\n");
+          return;
+        }
+        if (all.includes("You plan changes")) return reply("1. Build it.");
+        if (all.includes("You implement changes")) return reply("Built it.");
+        return reply("Looks good.");
+      }
       if (body.tools?.length && JSON.stringify(messages).includes("Run the tests")) {
         // A run that needs a command.
         if (answered) {
@@ -326,4 +345,60 @@ test("an agent that repeats itself is paused, and a message sends it on", async 
   await expect(page.locator(".bubble.user.steer")).toHaveCount(1);
   await expect(page.locator(".note.warn")).toHaveCount(2);
   await expect(page.locator(".bubble.agent .text").last()).toHaveText("I stopped reading.");
+});
+
+test("teams: from a template and by hand, with a sub-agent shown under its delegate call", async ({ page }) => {
+  await page.goto(base);
+  await page.getByLabel("Password", { exact: true }).fill("a long enough password");
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await page.getByRole("button", { name: "Settings" }).click();
+
+  // A template names no model: the owner picks the provider and model.
+  await page.getByRole("button", { name: "Team from a template" }).click();
+  await page.getByLabel("Template").selectOption({ label: "Plan, build, review" });
+  await page.getByLabel("Every agent: provider").selectOption("local");
+  await page.getByLabel("Every agent: model id").fill("local-model");
+  await page.getByRole("button", { name: "Create team" }).click();
+  await expect(page.locator("li.card", { hasText: "Plan, build, review" })).toContainText("sequential");
+
+  // A team by hand: the planner leads and hands the build to the builder.
+  await page.getByRole("button", { name: "Add team" }).click();
+  await page.getByLabel("Name", { exact: true }).fill("Lead");
+  await page.locator("select[name=mode]").selectOption("delegate");
+  await page.getByLabel(/^Members, in order/).fill("plan-build-review-planner, plan-build-review-builder");
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.locator("li.card", { hasText: "Lead" })).toContainText("delegate");
+  await expect(page.getByRole("link", { name: "Export Lead" })).toHaveAttribute("href", "/api/v1/teams/lead/export");
+
+  // The sequential team: three agents, one after another, each in its own block.
+  await page.getByRole("button", { name: "Chat" }).click();
+  if (await page.getByRole("button", { name: "New chat" }).count()) await page.getByRole("button", { name: "New chat" }).click();
+  await page.getByLabel("Team or agent").selectOption("team:plan-build-review");
+  await expect(page.getByText(/3 agents working one after another/)).toBeVisible();
+  await page.getByLabel("Project").selectOption("repo");
+  await page.getByLabel("Prompt", { exact: true }).fill("Plan and build a feature");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.locator(".status")).toHaveText("completed");
+  const blocks = page.locator(".bubble.agent:not([aria-label='Preparing the worktree'])");
+  await expect(blocks.locator("h3")).toContainText(["Planner", "Builder", "Reviewer"]);
+  await expect(blocks.locator(".text")).toHaveText(["1. Build it.", "Built it.", "Looks good."]);
+  await expect(page.getByText("Team plan-build-review, one after another.")).toBeVisible();
+
+  // The delegate team: the builder's work appears inside the planner's delegate call.
+  await page.getByRole("button", { name: "New chat" }).click();
+  await page.getByLabel("Team or agent").selectOption("team:lead");
+  await page.getByLabel("Project").selectOption("repo");
+  await page.getByLabel("Prompt", { exact: true }).fill("Plan and build with help");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.locator(".status")).toHaveText("completed");
+  const call = page.locator(".tool", { hasText: "delegate" });
+  await expect(call.locator(".task")).toHaveText("Plan and build: the build part");
+  const sub = call.getByRole("article", { name: "Sub-agent Builder" });
+  await expect(sub.locator(".text")).toHaveText("Built it.");
+  await expect(page.locator(".timeline > div > .bubble.agent").last().locator("> .text")).toHaveText("The builder is done.");
+
+  // A reload replays the nesting.
+  await page.reload();
+  await expect(page.locator(".tool", { hasText: "delegate" }).getByRole("article", { name: "Sub-agent Builder" })).toBeVisible();
+  await expect(page.locator(".runs small").first()).toContainText("team lead");
 });

@@ -8,6 +8,7 @@ use patina_core::events::Event;
 use patina_core::project_config::{ProjectConfig, ProjectsFile};
 use patina_core::provider::{ChatProvider, ProviderError};
 use patina_core::provider_config::{ProviderProfile, ProvidersFile};
+use patina_core::team_config::TeamConfig;
 use patina_core::{Config, Paths};
 use patina_providers::{GenaiProvider, Guarded};
 use patina_store::{Db, secrets::Secrets};
@@ -215,27 +216,7 @@ impl AppState {
     }
 
     pub fn list_agents(&self) -> ApiResult<Vec<AgentConfig>> {
-        let mut out = vec![];
-        let rd = match std::fs::read_dir(self.agents_dir()) {
-            Ok(r) => r,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
-            Err(e) => return Err(ApiError::internal(e)),
-        };
-        for entry in rd.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
-                continue;
-            }
-            match std::fs::read_to_string(&path)
-                .map_err(|e| e.to_string())
-                .and_then(|t| AgentConfig::parse(&t))
-            {
-                Ok(a) => out.push(a),
-                Err(e) => {
-                    tracing::warn!(file = %path.display(), error = %e, "skipping invalid agent file")
-                }
-            }
-        }
+        let mut out = read_configs(&self.agents_dir(), "agent", AgentConfig::parse)?;
         out.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(out)
     }
@@ -259,4 +240,56 @@ impl AppState {
             Err(e) => Err(ApiError::internal(e)),
         }
     }
+
+    fn teams_dir(&self) -> PathBuf {
+        self.paths.config_dir.join("teams")
+    }
+
+    pub fn list_teams(&self) -> ApiResult<Vec<TeamConfig>> {
+        let mut out = read_configs(&self.teams_dir(), "team", TeamConfig::parse)?;
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(out)
+    }
+
+    pub fn get_team(&self, id: &str) -> ApiResult<Option<TeamConfig>> {
+        Ok(self.list_teams()?.into_iter().find(|t| t.id == id))
+    }
+
+    pub fn save_team(&self, t: &TeamConfig) -> ApiResult<()> {
+        t.validate().map_err(ApiError::bad_request)?;
+        std::fs::create_dir_all(self.teams_dir()).map_err(ApiError::internal)?;
+        let text = t.to_toml().map_err(ApiError::internal)?;
+        write_atomic(&self.teams_dir().join(format!("{}.toml", t.id)), &text).map_err(ApiError::internal)
+    }
+
+    pub fn delete_team(&self, id: &str) -> ApiResult<bool> {
+        // The id was validated by the caller as [A-Za-z0-9_-], so it cannot escape the folder.
+        match std::fs::remove_file(self.teams_dir().join(format!("{id}.toml"))) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(ApiError::internal(e)),
+        }
+    }
+}
+
+/// Every valid `*.toml` in a folder. A file that does not parse is skipped with a warning, so one bad hand edit does
+/// not hide the rest. A missing folder is an empty list.
+fn read_configs<T>(dir: &std::path::Path, what: &str, parse: fn(&str) -> Result<T, String>) -> ApiResult<Vec<T>> {
+    let mut out = vec![];
+    let rd = match std::fs::read_dir(dir) {
+        Ok(r) => r,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(ApiError::internal(e)),
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+            continue;
+        }
+        match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| parse(&t)) {
+            Ok(c) => out.push(c),
+            Err(e) => tracing::warn!(file = %path.display(), error = %e, "skipping invalid {what} file"),
+        }
+    }
+    Ok(out)
 }

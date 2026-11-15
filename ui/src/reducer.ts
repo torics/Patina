@@ -53,7 +53,11 @@ export interface MessageItem {
 export type Item = TextItem | ToolItem | CheckpointItem | NoteItem | MessageItem;
 
 export interface AgentBlock {
+  /** The agent's id in this run: a sub-agent runs as `builder#2`. */
   agentId: string;
+  /** For a sub-agent: the agent and the `delegate` call that started it. Its block is shown under that call. */
+  parent: string | null;
+  toolCallId: string | null;
   name: string;
   model: string;
   startedAt: number;
@@ -71,6 +75,9 @@ export interface AgentBlock {
 export interface Timeline {
   lastSeq: number;
   prompt: string;
+  /** The team of a team run, and how its agents work together. */
+  team: string | null;
+  mode: string | null;
   status: string;
   error: string | null;
   hasWorkspace: boolean;
@@ -92,7 +99,7 @@ export interface Timeline {
 }
 
 export function emptyTimeline(): Timeline {
-  return { lastSeq: 0, prompt: "", status: "queued", error: null, hasWorkspace: false, dirtyCheckout: false, sandbox: null, sandboxDetail: null, setup: [], blocks: [], usage: null, rollbacks: [], changes: 0 };
+  return { lastSeq: 0, prompt: "", team: null, mode: null, status: "queued", error: null, hasWorkspace: false, dirtyCheckout: false, sandbox: null, sandboxDetail: null, setup: [], blocks: [], usage: null, rollbacks: [], changes: 0 };
 }
 
 function lastBlock(t: Timeline, agentId: string | null): AgentBlock | undefined {
@@ -140,6 +147,8 @@ export function applyEvent(t: Timeline, ev: Event): Timeline {
         next.error = null;
       }
       next.prompt = String(p.prompt ?? "");
+      next.team = typeof p.team === "string" ? p.team : null;
+      next.mode = typeof p.mode === "string" ? p.mode : null;
       next.status = "running";
       next.hasWorkspace = Boolean(p.has_workspace);
       next.dirtyCheckout = Boolean(p.uncommitted_changes_not_included);
@@ -155,6 +164,8 @@ export function applyEvent(t: Timeline, ev: Event): Timeline {
       }
       next.blocks.push({
         agentId: ev.agent_id ?? "",
+        parent: typeof p.parent === "string" ? p.parent : null,
+        toolCallId: typeof p.tool_call_id === "string" ? p.tool_call_id : null,
         name: String(p.name ?? ev.agent_id ?? ""),
         model: String(p.model ?? ""),
         startedAt: ev.ts,
@@ -282,6 +293,16 @@ export function applyEvent(t: Timeline, ev: Event): Timeline {
       break;
   }
   return next;
+}
+
+/** The blocks to show at the top of the timeline: agents the run started itself, not sub-agents. */
+export function topBlocks(t: Timeline): AgentBlock[] {
+  return t.blocks.filter((b) => b.parent === null);
+}
+
+/** The sub-agent blocks a `delegate` call of `parent` started. A sub-agent resumed after a pause keeps its block. */
+export function delegated(t: Timeline, parent: string, toolCallId: string): AgentBlock[] {
+  return t.blocks.filter((b) => b.parent === parent && b.toolCallId === toolCallId);
 }
 
 /** Apply a live, unpersisted text delta. */
