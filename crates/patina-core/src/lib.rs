@@ -14,6 +14,7 @@ pub mod policy;
 pub mod project_config;
 pub mod provider;
 pub mod provider_config;
+pub mod redact;
 pub mod sandbox;
 pub mod team;
 pub mod team_config;

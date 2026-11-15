@@ -44,6 +44,8 @@ struct StoreHost {
     /// The project's repository and the run's worktree in it.
     workspace: Option<(PathBuf, PathBuf)>,
     artifacts: PathBuf,
+    /// The configured secret values, removed from every tool result.
+    secrets: patina_core::redact::Redactor,
 }
 
 fn host_err(e: impl std::fmt::Display) -> HostError {
@@ -201,6 +203,9 @@ impl RunHost for StoreHost {
         Ok(Saved { history, resume, finished })
     }
 
+    fn redact(&self, text: &str) -> String {
+        self.secrets.redact(text).into_owned()
+    }
     async fn agent_ids(&self) -> Result<Vec<String>, HostError> {
         store::agent_ids(&self.db, &self.run_id).await.map_err(host_err)
     }
@@ -413,6 +418,7 @@ pub(crate) async fn sandbox_for(st: &AppState, project: &ProjectConfig, run_id: 
             },
             protected: vec![own(&st.paths.data_dir), own(&st.paths.config_dir)],
             port: st.preview.port_for(run_id),
+            limits: project.limits,
         },
     )
     .map_err(sandbox_unavailable)
@@ -846,6 +852,7 @@ async fn drive(st: Arc<AppState>, run_id: String, plan: Plan, handle: Arc<RunHan
         last_seq: AtomicI64::new(last_seq),
         workspace: plan.repo.clone().zip(plan.worktree.clone()),
         artifacts: st.artifacts_dir(&run_id),
+        secrets: st.redactor().await,
     };
     let sandbox = plan.commands.as_ref().map(|c| c.sandbox().clone());
     let level = sandbox.as_ref().map(|s| s.level());
@@ -1096,6 +1103,10 @@ async fn prepare_worktree(
         let out = tokio::select! {
             out = commands.run(command, SETUP_TIMEOUT) => out,
             _ = cancel.cancelled() => return Ok(false),
+        };
+        let out = patina_core::tool::ToolOutput {
+            content: host.redact(&out.content),
+            ..out
         };
         let (content, artifact) = if out.content.len() > SETUP_LOG_LIMIT {
             let file = host.save_artifact("worktree_setup.txt", &out.content).await.map_err(he)?;

@@ -25,3 +25,6 @@
 - An MCP tool's kind is `ToolKind::External`; the policy decides it by trust alone. Never let a mode, an allowlist or the sandbox state skip its question.
 - Values for MCP servers typed in the UI are stored as secrets (`secret:mcp/<server>/<name>`); no API response carries their values.
 - The CSP has no `unsafe-inline`. A library that injects `<style>` elements must be mounted in a shadow root (see `ui/src/cm.ts`).
+- Every process spawned for a command goes through `process::spawn`, which applies the project's limits and the command's cgroup. A limit that cannot be applied fails the spawn; it is never skipped silently. Never list a limit in `Caps::resource_limits` that is not enforced.
+- Every tool result goes through `RunHost::redact` before it is stored or sent. Any other place that stores or shows command output (like the `worktree_setup` log or the preview log) redacts it too, with `AppState::redactor`.
+- A new route is added in `router()` in `crates/patina-server/src/lib.rs`, where `tests/security.rs` finds it. Keep one `.route(...)` per line there.

@@ -2,7 +2,19 @@
 
 A lean, self-hosted, model-agnostic agent workbench in one Rust binary. The daemon serves a browser UI, holds your API keys, calls any LLM provider on your behalf and stores every run so you can watch and review it from any device.
 
-Status: **M7 (MCP)**. You can set a password, add providers and agents, and chat with streaming. An agent can work in a project: it reads, searches and edits files and runs commands in its own git worktree. Commands run in a sandbox (Landlock on Linux, or a container), each changing step is a checkpoint you can roll back to, and nothing reaches your branch until you merge. Runs can be paused, resumed and steered with messages, survive a restart of the daemon, and keep long histories inside the model's context. Teams run several agents, each on its own provider and model, from three built-in templates or your own. The workbench shows a project's files, an editor, each run's changes as diffs, and a live preview of the run's dev server, and it works from a phone. Agents can use tools from MCP servers, over stdio or Streamable HTTP; each tool asks before every call until you trust it. Hardening and release builds come next. See `DECISIONS.md`.
+Status: **M8, version 1 complete**. You can set a password, add providers and agents, and chat with streaming. An agent can work in a project: it reads, searches and edits files and runs commands in its own git worktree. Commands run in a sandbox (Landlock on Linux, or a container) with memory, process, CPU and file size limits where the machine can enforce them, each changing step is a checkpoint you can roll back to, and nothing reaches your branch until you merge. Runs can be paused, resumed and steered with messages, survive a restart of the daemon, and keep long histories inside the model's context. Teams run several agents, each on its own provider and model, from three built-in templates or your own. The workbench shows a project's files, an editor, each run's changes as diffs, and a live preview of the run's dev server, and it works from a phone. Agents can use tools from MCP servers, over stdio or Streamable HTTP; each tool asks before every call until you trust it. Releases ship static binaries for Linux, macOS and Windows. See `DECISIONS.md`.
+
+## Install
+
+Download a release and start it: [docs/install.md](docs/install.md) goes from download to a first run in a few minutes. More guides:
+
+- [Adding a provider](docs/providers.md)
+- [Sharing a team](docs/teams.md)
+- [Using Patina from another device](docs/remote.md), with Tailscale
+- [Running it as a systemd user service](docs/systemd.md), which also turns on per-command resource limits
+- [Backup and restore](docs/backup.md)
+- [Adding an MCP server](docs/mcp.md)
+- [Config reference](docs/config.md) and [security model](SECURITY.md)
 
 ## Build and run
 
@@ -18,7 +30,7 @@ The first run prints the address (`http://127.0.0.1:7878`) and a one-time setup 
 
 `serve` also starts the preview listener on `127.0.0.1:7879` (see [The workbench](#the-workbench)).
 
-Other commands: `patina doctor` checks git, the sandbox, the container runtime, ports, config files and leftover worktrees; `patina reset-password` prints a new setup token; `patina version` prints the version. `serve` accepts `--bind`, `--port`, `--preview-port`, `--config-dir`, `--data-dir` and `--log-format human|json`.
+Other commands: `patina doctor` checks git, the sandbox, the resource limits, the container runtime, ports, config files and leftover worktrees; `patina export <run id>` writes a run as Markdown or JSON (`--format json`, `--output FILE`; the last eight characters of the id are enough); `patina reset-password` prints a new setup token; `patina version` prints the version and build, and `patina version --check` asks whether a newer release exists, the only call Patina makes to an address you did not configure. `serve` accepts `--bind`, `--port`, `--preview-port`, `--config-dir`, `--data-dir` and `--log-format human|json`.
 
 ## Work in a project
 
@@ -79,7 +91,9 @@ An agent that has the `run_command` tool can run shell commands in its worktree,
 - **Container** (Docker or Podman): set `container_image` on the project. Commands see only the worktree.
 - **None**: on a host with neither, every edit and command asks first, whatever the policy says.
 
-`patina doctor` and the Settings page show which one your machine has and what it does not cover. Read `SECURITY.md` before you choose `autopilot`.
+Each command also gets the project's `limits`: memory (8 GiB by default), processes (2048), CPU (no cap) and the largest file it may write (8 GiB). Memory, processes and CPU are enforced per command with cgroup v2 when Patina runs as a systemd unit with `Delegate=yes` ([docs/systemd.md](docs/systemd.md)), and for the run's container under the container backend; the file size cap holds everywhere on Linux and macOS. Patina also removes any configured secret value (provider keys, MCP tokens) from command output and tool results before they are stored or reach a model.
+
+`patina doctor` and the Settings page show which sandbox your machine has, which limits hold, and what they do not cover. Read `SECURITY.md` before you choose `autopilot`.
 
 A toolchain outside the system folders must be opened to the sandbox. For Rust installed with rustup, in the project's "Sandbox and commands" settings or in `projects.toml`:
 
@@ -100,7 +114,7 @@ The same from a terminal, without the daemon:
 patina run --project ~/code/my-project --team assistant "Add a section about testing to the README"
 ```
 
-It prints the run's events and asks for each approval on the terminal. `--team` takes an agent id until teams arrive. Limits: `--max-steps`, `--max-tokens`, `--max-cost-usd`, `--max-wall-clock-s`. `--json` prints one event per line. `--yes` approves everything and is accepted only when the project has a sandbox on this machine. Exit codes: 0 completed, 1 failed, 3 an approval was needed and no terminal was attached, 4 a limit was reached, 5 paused (the agent repeated itself; resume it in the web UI), 130 stopped.
+It prints the run's events and asks for each approval on the terminal. `--team` takes a team id, or an agent id to run one agent. Limits: `--max-steps`, `--max-tokens`, `--max-cost-usd`, `--max-wall-clock-s`. `--json` prints one event per line. `--yes` approves everything and is accepted only when the project has a sandbox on this machine. Exit codes: 0 completed, 1 failed, 3 an approval was needed and no terminal was attached, 4 a limit was reached, 5 paused (the agent repeated itself; resume it in the web UI), 130 stopped.
 
 Config lives in `~/.config/patina/` and data in `~/.local/share/patina/` unless overridden. See `docs/config.md`.
 
@@ -112,7 +126,9 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test --a
 ./scripts/check-budgets.sh                                # binary size, idle memory, UI size
 ```
 
-The sandbox tests in `crates/patina/tests/sandbox.rs` drive the real binary with a scripted model that tries to get out. They need Landlock; on a host without it they print a notice, unless `PATINA_REQUIRE_LANDLOCK=1` is set, as in CI. The container test runs with `PATINA_TEST_CONTAINER=1` and needs a running Docker or Podman with the `alpine:3` image.
+The sandbox tests in `crates/patina/tests/sandbox.rs` drive the real binary with a scripted model that tries to get out. They need Landlock; on a host without it they print a notice, unless `PATINA_REQUIRE_LANDLOCK=1` is set, as in CI. The container test runs with `PATINA_TEST_CONTAINER=1` and needs a running Docker or Podman with the `alpine:3` image. The cgroup test (`crates/patina-tools/tests/limits.rs`) needs a cgroup delegated to the test process alone; CI runs it as its own scope with `sudo systemd-run --scope -p Delegate=yes` and `PATINA_TEST_CGROUP=1`. `crates/patina-server/tests/security.rs` reads every route from the router's source and checks the session, CSRF, Origin and Host rules and that no response carries a stored secret.
+
+A tag `v<version>` runs `.github/workflows/release.yml`: static musl builds for Linux x86_64 and ARM64, macOS x86_64 and ARM64, and Windows x86_64, each with third-party notices, then `SHA256SUMS`, the install script, a GitHub release and a container image on GHCR.
 
 Live provider tests are opt-in and need your keys. They stream a reply, then make a tool call and use its result. The variables are listed at the top of `crates/patina-providers/tests/live.rs`.
 

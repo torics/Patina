@@ -142,6 +142,27 @@ impl Secrets {
         row.map(|(n, c)| self.open_sealed(name, &n, &c)).transpose()
     }
 
+    /// Every stored value, for removing them from command output. For server-side use only.
+    pub async fn values(&self) -> Result<Vec<String>, StoreError> {
+        let rows = self
+            .db
+            .call(|c| {
+                let mut s = c.prepare("SELECT name, nonce, ciphertext FROM secrets")?;
+                let rows = s
+                    .query_map([], |r| {
+                        Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, Vec<u8>>(2)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await?;
+        // A value that cannot be opened is skipped here; reading it for use reports the problem.
+        Ok(rows
+            .into_iter()
+            .filter_map(|(name, nonce, ct)| self.open_sealed(&name, &nonce, &ct).ok())
+            .collect())
+    }
+
     /// The last four characters, for display. Never more.
     pub async fn hint(&self, name: &str) -> Result<Option<String>, StoreError> {
         Ok(self.get(name).await?.map(|v| {
@@ -178,6 +199,10 @@ mod tests {
         assert_eq!(s.get("openai").await.unwrap().as_deref(), Some("sk-secret-value-1234"));
         assert_eq!(s.hint("openai").await.unwrap().as_deref(), Some("1234"));
         assert_eq!(s.get("missing").await.unwrap(), None);
+        s.put("mcp/search/TOKEN", "tok-0987654321").await.unwrap();
+        let mut all = s.values().await.unwrap();
+        all.sort();
+        assert_eq!(all, ["sk-secret-value-1234", "tok-0987654321"]);
         // The stored bytes never contain the plaintext.
         let raw = std::fs::read(t.path().join("p.db")).unwrap();
         let wal = std::fs::read(t.path().join("p.db-wal")).unwrap_or_default();

@@ -210,7 +210,9 @@ test("run an agent in a project, approve its edit after reading the diff, and me
   // The page says what contains commands on this machine, and claims no limit that is not enforced.
   const sandbox = page.getByRole("region", { name: "Sandbox" });
   await expect(sandbox.getByRole("heading")).toContainText("Sandbox on this machine");
-  await expect(sandbox).toContainText("Memory, CPU and process limits: none enforced");
+  // Only enforced limits are listed; without a delegated cgroup that is the file size cap (and a container's, if any).
+  await expect(sandbox).toContainText("Resource limits enforced here: largest file a command may write (RLIMIT_FSIZE)");
+  await expect(sandbox).not.toContainText("cgroup");
 
   // Start a run in it.
   await page.getByRole("button", { name: "Workbench" }).click();

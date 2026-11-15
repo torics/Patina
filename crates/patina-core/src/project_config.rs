@@ -1,7 +1,7 @@
 //! `projects.toml`: registered project folders and their policy.
 use crate::policy::PolicyMode;
 use crate::provider_config::valid_id;
-use crate::sandbox::SandboxChoice;
+use crate::sandbox::{ResourceLimits, SandboxChoice};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use ts_rs::TS;
@@ -50,6 +50,9 @@ pub struct ProjectConfig {
     /// `{port}` is replaced by the run's preview port, which is also in `PORT`.
     #[serde(default)]
     pub dev_command: Option<String>,
+    /// Caps on memory, processes, CPU and file size for each command. See `ResourceLimits`.
+    #[serde(default)]
+    pub limits: ResourceLimits,
 }
 
 impl Default for ProjectConfig {
@@ -71,6 +74,7 @@ impl Default for ProjectConfig {
             worktree_copy_secrets: vec![],
             worktree_setup: None,
             dev_command: None,
+            limits: ResourceLimits::default(),
         }
     }
 }
@@ -161,6 +165,7 @@ impl ProjectConfig {
         if self.worktree_setup.as_deref().is_some_and(|c| c.trim().is_empty()) {
             return Err(format!("project {id}: worktree_setup is empty"));
         }
+        self.limits.validate().map_err(|e| format!("project {id}: {e}"))?;
         Ok(())
     }
 }
@@ -259,7 +264,7 @@ mod tests {
             *p
         );
         let text = f.to_toml().unwrap();
-        for key in ["sandbox", "network", "allow_commands", "env", "worktree"] {
+        for key in ["sandbox", "network", "allow_commands", "env", "worktree", "limits"] {
             assert!(!text.contains(key), "{key} should not be written when it is the default:\n{text}");
         }
         // The API sends every setting, so a client never has to know the defaults.
@@ -276,6 +281,12 @@ mod tests {
         let full = project("sandbox = \"container\"\ncontainer_image = \"img\"\nnetwork = false\nallow_commands = [\"make *\"]\nworktree_setup = \"make deps\"\n[project.env]\nCI = \"1\"\n").unwrap();
         assert_eq!(ProjectsFile::parse(&full.to_toml().unwrap()).unwrap(), full);
         assert_eq!(full.get("site").unwrap().env["CI"], "1");
+        // A limit that is set keeps the defaults of the others, and zero turns one off.
+        let limited = project("limits = { memory_mb = 1024, file_size_mb = 0 }\n").unwrap();
+        let l = limited.get("site").unwrap().limits;
+        assert_eq!((l.memory_mb, l.processes, l.file_size_mb), (1024, 2048, 0));
+        assert_eq!((l.memory_bytes(), l.file_size_bytes()), (Some(1 << 30), None));
+        assert_eq!(ProjectsFile::parse(&limited.to_toml().unwrap()).unwrap(), limited);
     }
 
     #[test]
@@ -292,6 +303,9 @@ mod tests {
             "worktree_copy_secrets = [\".env\"]\n",
             "sandbox = \"container\"\n",
             "worktree_setup = \" \"\n",
+            "limits = { memory_mb = 10 }\n",
+            "limits = { processes = 3 }\n",
+            "limits = { cpus = -1.0 }\n",
         ] {
             assert!(project(bad).is_err(), "{bad}");
         }

@@ -2,7 +2,8 @@
 //!
 //! Every command starts in its own process group. Stopping sends SIGTERM to the group, waits a short grace
 //! period, sends SIGKILL, then looks for survivors that left the group: each command carries a unique marker in
-//! its environment (`PATINA_CMD`), which every process it starts inherits.
+//! its environment (`PATINA_CMD`), which every process it starts inherits. Where the daemon has a delegated
+//! cgroup, each command also gets a cgroup of its own, which holds its limits and is killed as a whole.
 use patina_core::sandbox::{Prepared, Sandbox};
 use std::collections::VecDeque;
 use std::process::Stdio;
@@ -55,6 +56,8 @@ pub struct Running {
     pub pid: Option<u32>,
     pub marker: String,
     readers: Vec<tokio::task::JoinHandle<()>>,
+    /// The command's own cgroup, when the daemon has a delegated one.
+    cgroup: Option<crate::cgroup::Leaf>,
 }
 
 fn pump(mut from: impl AsyncRead + Unpin + Send + 'static, into: Arc<Mutex<Capture>>) -> tokio::task::JoinHandle<()> {
@@ -69,8 +72,13 @@ fn pump(mut from: impl AsyncRead + Unpin + Send + 'static, into: Arc<Mutex<Captu
     })
 }
 
-/// Start `p` with exactly its environment, no stdin, in its own process group.
+/// Start `p` with exactly its environment, no stdin, in its own process group, with its limits. A limit that
+/// cannot be applied fails the spawn: the command does not run without it.
 pub fn spawn(p: &Prepared, marker: &str) -> std::io::Result<Running> {
+    let cgroup = match (&p.limits, crate::cgroup::active()) {
+        (Some(limits), Some(tree)) => Some(tree.leaf(marker, limits).map_err(std::io::Error::other)?),
+        _ => None,
+    };
     let mut cmd = Command::new(&p.program);
     cmd.args(&p.args).env_clear().envs(p.env.iter().map(|(k, v)| (k, v)));
     if let Some(dir) = &p.cwd {
@@ -82,6 +90,37 @@ pub fn spawn(p: &Prepared, marker: &str) -> std::io::Result<Running> {
         .kill_on_drop(true);
     #[cfg(unix)]
     cmd.process_group(0);
+    #[cfg(unix)]
+    {
+        let file_size = p.limits.and_then(|l| l.file_size_bytes()).map(|want| {
+            // The hard limit can only be lowered, so a cap above the daemon's own is the daemon's own.
+            let hard = rustix::process::getrlimit(rustix::process::Resource::Fsize).maximum;
+            hard.map_or(want, |h| want.min(h))
+        });
+        #[cfg(target_os = "linux")]
+        let procs = cgroup.as_ref().map(|c| c.procs_fd());
+        #[cfg(not(target_os = "linux"))]
+        let procs: Option<i32> = None;
+        if file_size.is_some() || procs.is_some() {
+            // SAFETY: between fork and exec only async-signal-safe system calls are made, and nothing allocates.
+            unsafe {
+                cmd.pre_exec(move || {
+                    if let Some(fd) = procs {
+                        let fd = rustix::fd::BorrowedFd::borrow_raw(fd);
+                        rustix::io::write(fd, b"0")?;
+                    }
+                    if let Some(bytes) = file_size {
+                        let limit = rustix::process::Rlimit {
+                            current: Some(bytes),
+                            maximum: Some(bytes),
+                        };
+                        rustix::process::setrlimit(rustix::process::Resource::Fsize, limit)?;
+                    }
+                    Ok(())
+                });
+            }
+        }
+    }
     let mut child = cmd.spawn()?;
     let capture = Arc::new(Mutex::new(Capture::default()));
     let mut readers = vec![];
@@ -97,6 +136,7 @@ pub fn spawn(p: &Prepared, marker: &str) -> std::io::Result<Running> {
         capture,
         marker: marker.to_string(),
         readers,
+        cgroup,
     })
 }
 
@@ -230,10 +270,19 @@ impl Running {
             signal_group(pid, rustix::process::Signal::KILL);
         }
         let _ = self.child.start_kill();
+        self.kill_cgroup();
         sweep(&self.marker);
         sandbox.kill(&self.marker).await;
         let _ = self.child.wait().await;
         self.pid = None;
+    }
+
+    /// Kill everything in the command's cgroup, if it has one. This reaches what left the process group and
+    /// cleared the marker.
+    pub fn kill_cgroup(&self) {
+        if let Some(c) = &self.cgroup {
+            c.kill();
+        }
     }
 
     /// Wait until the output pipes close, but not for long: a survivor may still hold them.
@@ -259,6 +308,7 @@ impl Drop for Running {
             signal_group(pid, rustix::process::Signal::KILL);
             sweep(&self.marker);
         }
+        // Dropping the cgroup kills what is still in it and removes it.
     }
 }
 
@@ -288,6 +338,7 @@ pub async fn run(sandbox: &dyn Sandbox, prepared: &Prepared, marker: &str, timeo
         if let Some(pid) = running.pid.take() {
             signal_group(pid, rustix::process::Signal::KILL);
         }
+        running.kill_cgroup();
         sweep(marker);
         sandbox.kill(marker).await;
     }

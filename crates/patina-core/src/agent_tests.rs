@@ -105,6 +105,8 @@ struct Host {
     inbox: Mutex<VecDeque<Vec<String>>>,
     /// How often the stored history was replaced by a compacted one.
     replaced: Mutex<u32>,
+    /// The secret values this host removes from tool results.
+    secrets: crate::redact::Redactor,
 }
 
 #[async_trait]
@@ -161,6 +163,9 @@ impl RunHost for Host {
     }
     async fn agent_ids(&self) -> Result<Vec<String>, HostError> {
         Ok(vec![])
+    }
+    fn redact(&self, text: &str) -> String {
+        self.secrets.redact(text).into_owned()
     }
 }
 
@@ -298,6 +303,25 @@ async fn a_read_runs_without_asking_and_the_loop_continues_to_the_final_answer()
     assert_eq!(reqs[0].tools[0].name, "read_file");
     assert!(reqs[0].system.as_ref().unwrap().starts_with(PREAMBLE));
     assert!(reqs[0].system.as_ref().unwrap().ends_with("Be careful."));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_secret_value_in_a_tool_result_is_never_stored_or_sent_to_the_model() {
+    let host = Host {
+        secrets: crate::redact::Redactor::new(["sk-test-0123456789".to_string()]),
+        ..Default::default()
+    };
+    let read = fake("read_file", ToolKind::Read, "API_KEY=sk-test-0123456789\n");
+    let p = Scripted::new(vec![calls(&[("c1", "read_file", json!({"path": ".env"}))]), text("done")]);
+    let (out, h) = run(&ctx(p.clone(), &host, vec![read])).await;
+    assert_eq!(out, Outcome::Completed);
+    let expected = format!("API_KEY={}\n", crate::redact::REDACTED);
+    assert_eq!(result_of(&h[2], 0).0, expected);
+    assert_eq!(host.of("tool_result")[0]["content"], expected.as_str());
+    let sent = serde_json::to_string(&p.requests.lock().unwrap()[1].messages).unwrap();
+    assert!(!sent.contains("sk-test-0123456789"), "{sent}");
+    let stored = serde_json::to_string(&*host.saved.lock().unwrap()).unwrap();
+    assert!(!stored.contains("sk-test-0123456789"), "{stored}");
 }
 
 #[tokio::test(start_paused = true)]

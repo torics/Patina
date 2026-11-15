@@ -218,10 +218,34 @@ async fn all_events(st: &AppState, run_id: &str) -> ApiResult<Vec<Event>> {
 
 /// The whole run as Markdown or JSON, for keeping or sharing. Secrets never enter events, so none are here.
 pub async fn export(State(st): St, Path(id): Path<String>, Query(q): Query<ExportQuery>) -> ApiResult<Response> {
-    let run = view(&st, load(&st, &id).await?);
-    let events = all_events(&st, &id).await?;
+    let exported = export_run(&st, &id, q.format.as_deref().unwrap_or("md")).await?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, exported.content_type.to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}\"", exported.file_name),
+            ),
+        ],
+        exported.body,
+    )
+        .into_response())
+}
+
+/// A run written out for keeping.
+pub struct Exported {
+    pub body: String,
+    pub content_type: &'static str,
+    /// For example `patina-run-1a2b3c4d.md`.
+    pub file_name: String,
+}
+
+/// A run as `md` or `json`. Used by the API and by `patina export`.
+pub async fn export_run(st: &AppState, id: &str, format: &str) -> ApiResult<Exported> {
+    let run = view(st, load(st, id).await?);
+    let events = all_events(st, id).await?;
     let short: String = id.chars().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect();
-    let (body, kind, ext) = match q.format.as_deref().unwrap_or("md") {
+    let (body, content_type, ext) = match format {
         "json" => (
             serde_json::to_string_pretty(&json!({"run": run, "events": events})).map_err(ApiError::internal)?,
             "application/json",
@@ -230,17 +254,11 @@ pub async fn export(State(st): St, Path(id): Path<String>, Query(q): Query<Expor
         "md" => (markdown(&run, &events), "text/markdown; charset=utf-8", "md"),
         other => return Err(ApiError::bad_request(format!("unknown format {other:?}; use md or json"))),
     };
-    Ok((
-        [
-            (header::CONTENT_TYPE, kind.to_string()),
-            (
-                header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"patina-run-{short}.{ext}\""),
-            ),
-        ],
+    Ok(Exported {
         body,
-    )
-        .into_response())
+        content_type,
+        file_name: format!("patina-run-{short}.{ext}"),
+    })
 }
 
 /// A fenced block that the content cannot close early.

@@ -512,6 +512,10 @@ async fn the_container_backend_contains_commands_and_cleans_up() {
         runs("sleep 301 & setsid sleep 302 & echo started; sleep 303", json!({"timeout_s": 2})),
         runs("ps -o args | grep -c '^sleep 30[123]'; echo end", json!({})),
         runs("echo $$ > bgpid; exec sleep 304", json!({"background": true})),
+        runs(
+            "cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/pids.max /sys/fs/cgroup/cpu.max",
+            json!({}),
+        ),
         says("Done."),
     ];
     let port = fake_model(script).await;
@@ -525,7 +529,7 @@ async fn the_container_backend_contains_commands_and_cleans_up() {
     with_commands(&s);
     project(
         &s,
-        "policy = \"autopilot\"\nsandbox = \"container\"\ncontainer_image = \"alpine:3\"\nnetwork = false\n",
+        "policy = \"autopilot\"\nsandbox = \"container\"\ncontainer_image = \"alpine:3\"\nnetwork = false\nlimits = { memory_mb = 256, processes = 64, cpus = 0.5 }\n",
     );
     // HOME stays the real one: the runtime's client needs it to find its configuration.
     let ran = run_json(&s, &[("SECRET_TOKEN", "hunter2-from-the-daemon")], &["Try to get out"]).await;
@@ -533,7 +537,7 @@ async fn the_container_backend_contains_commands_and_cleans_up() {
     assert_eq!(ran.of("run_started")[0]["payload"]["sandbox"], "container");
     assert!(ran.of("approval_requested").is_empty());
     let r = ran.results("run_command");
-    assert_eq!(r.len(), 6, "{r:?}");
+    assert_eq!(r.len(), 7, "{r:?}");
     // The command ran in the image, in the worktree, with no network interface but loopback.
     assert_eq!(r[0].0, "exit code 0\nNAME=\"Alpine Linux\"\n/workspace\nlo", "{}", r[0].0);
     // Nothing of the host is there: not the home, not Patina's data, not the owner's checkout.
@@ -551,6 +555,8 @@ async fn the_container_backend_contains_commands_and_cleans_up() {
     // A timeout stops everything the command started, also what left its process group.
     assert!(r[3].1 && r[3].0.contains("timed out after 2 seconds"), "{}", r[3].0);
     assert_eq!(r[4].0, "exit code 0\n0\nend", "processes survived the timeout: {}", r[4].0);
+    // The project's limits cap the run's container.
+    assert_eq!(r[6].0, "exit code 0\n268435456\n64\n50000 100000", "{}", r[6].0);
     // The file the command made is in the worktree and belongs to the owner.
     let made = worktree(&s).join("made.txt");
     assert_eq!(std::fs::read_to_string(&made).unwrap(), "made\n");

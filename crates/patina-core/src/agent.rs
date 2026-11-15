@@ -90,6 +90,9 @@ pub trait RunHost: Send + Sync {
     async fn load_agent(&self, agent_id: &str) -> Result<Saved, HostError>;
     /// Every agent id that has events in the run, so a new sub-agent gets an id of its own.
     async fn agent_ids(&self) -> Result<Vec<String>, HostError>;
+    /// `text` without any configured secret value. Every tool result passes through here before it is stored,
+    /// shown or sent to the model.
+    fn redact(&self, text: &str) -> String;
 }
 
 /// One agent's stored state, for resuming it.
@@ -805,6 +808,11 @@ async fn steps(spec: &AgentSpec, ctx: &RunCtx<'_>, history: &mut Vec<Message>, r
                                 }
                             },
                         }
+                    };
+                    let out = ToolOutput {
+                        content: ctx.host.redact(&out.content),
+                        summary: out.summary.as_deref().map(|s| ctx.host.redact(s)),
+                        ..out
                     };
                     let (content, artifact) = match truncate_output(&out.content) {
                         Some(short) => (

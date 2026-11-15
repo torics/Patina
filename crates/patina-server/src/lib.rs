@@ -82,7 +82,8 @@ pub fn router(st: Arc<AppState>) -> Router {
         .route("/auth/setup", post(auth::setup))
         .route("/auth/login", post(auth::login))
         .route("/auth/logout", post(auth::logout))
-        .route("/auth/session", get(auth::session_state));
+        .route("/auth/session", get(auth::session_state))
+        .layer(middleware::from_fn(auth::same_origin));
     let api = public.merge(protected).fallback(|| async { error::ApiError::not_found("route") });
     Router::new()
         .route("/healthz", get(healthz))

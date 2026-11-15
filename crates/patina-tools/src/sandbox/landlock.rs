@@ -235,6 +235,7 @@ impl Sandbox for LandlockSandbox {
             args: helper_args(&self.policy, &sh, &sh_args),
             env: base_env(&self.setup, &self.setup.home, marker),
             cwd: Some(self.setup.worktree.clone()),
+            limits: Some(self.setup.limits),
         })
     }
 }

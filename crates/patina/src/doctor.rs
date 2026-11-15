@@ -5,6 +5,7 @@ use patina_core::project_config::ProjectsFile;
 use patina_core::provider_config::ProvidersFile;
 use patina_core::sandbox::SandboxLevel;
 use patina_core::{Config, Paths};
+use patina_tools::cgroup::{CgroupState, describe};
 use patina_tools::git;
 use patina_tools::sandbox::Caps;
 use serde::Serialize;
@@ -122,11 +123,38 @@ fn sandbox_checks(c: &mut Checks, caps: &Caps) {
             "none answered (docker or podman). The container sandbox is not available.",
         ),
     }
-    c.add(
-        "resource limits",
-        Status::Note,
-        "none enforced. Commands have a timeout and are stopped as a group, but memory, CPU and process counts are not capped.",
-    );
+    let file_size = if cfg!(unix) {
+        " Every command gets the project's cap on the size of a file it writes (RLIMIT_FSIZE)."
+    } else {
+        ""
+    };
+    let container = if caps.runtime.is_some() {
+        " Projects on the container backend get their limits on the run's container."
+    } else {
+        ""
+    };
+    match &caps.cgroup {
+        CgroupState::Active(controllers) => c.add(
+            "resource limits",
+            Status::Ok,
+            format!("{} per command through cgroup v2.{file_size}{container}", describe(controllers)),
+        ),
+        CgroupState::Possible(controllers) => c.add(
+            "resource limits",
+            Status::Ok,
+            format!(
+                "This process's cgroup is delegated, so a daemon started the same way caps {} per command through cgroup v2.{file_size}{container}",
+                describe(controllers)
+            ),
+        ),
+        CgroupState::Unavailable(why) => c.add(
+            "resource limits",
+            Status::Note,
+            format!(
+                "No cgroup v2 limits: {why}. Memory, processes and CPU are not capped for commands outside a container; run the daemon as a systemd unit with Delegate=yes to cap them.{file_size}{container}"
+            ),
+        ),
+    }
 }
 
 async fn port_check(c: &mut Checks, name: &str, bind: &str, port: u16) {
@@ -312,6 +340,11 @@ async fn worktree_checks(c: &mut Checks, paths: &Paths) {
 
 pub async fn report(paths: &Paths) -> Report {
     let mut c = Checks(vec![]);
+    c.add(
+        "folders",
+        Status::Ok,
+        format!("config {}\ndata {}", paths.config_dir.display(), paths.data_dir.display()),
+    );
     match git::version().await {
         Some(v) => c.add("git", Status::Ok, v),
         None => c.add("git", Status::Problem, "git was not found on PATH. Projects need it."),
@@ -348,6 +381,7 @@ mod tests {
         let old = lines(Caps {
             landlock_abi: Some(3),
             runtime: None,
+            cgroup: CgroupState::Unavailable("its cgroup is not delegated to it".into()),
         });
         assert!(old.contains("Ok sandbox: Landlock, ABI 3."), "{old}");
         assert!(
@@ -358,6 +392,7 @@ mod tests {
         let new = lines(Caps {
             landlock_abi: Some(6),
             runtime: Some(("docker".into(), "27.1".into())),
+            cgroup: CgroupState::Active(vec!["memory".into(), "pids".into(), "cpu".into()]),
         });
         assert!(
             new.contains("ABI 6 or later") && new.contains("UDP is not blocked") && new.contains("Ok container runtime: docker 27.1"),
@@ -368,10 +403,16 @@ mod tests {
             none.contains("Note sandbox: No sandbox is available") && none.contains("`patina run --yes` are refused"),
             "{none}"
         );
-        // No limit is enforced, so every host is told so.
-        for text in [&old, &new, &none] {
-            assert!(text.contains("Note resource limits: none enforced"), "{text}");
-        }
+        // Limits are named only where they are enforced.
+        assert!(
+            old.contains("Note resource limits: No cgroup v2 limits: its cgroup is not delegated") && !old.contains("container backend"),
+            "{old}"
+        );
+        assert!(
+            new.contains("Ok resource limits: memory, processes and CPU per command through cgroup v2.")
+                && new.contains("on the run's container"),
+            "{new}"
+        );
     }
 
     #[tokio::test]

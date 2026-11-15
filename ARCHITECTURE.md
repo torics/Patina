@@ -63,6 +63,10 @@ The event log is the single source of truth for the UI. Each agent's model conte
 
 `process::run` starts each command in its own process group with a unique `PATINA_CMD` marker in its environment, captures at most 2 MB of output, and on timeout or cancel sends `SIGTERM`, waits two seconds, sends `SIGKILL`, then sweeps `/proc` for processes that carry the marker. `Commands` holds a run's background processes, at most eight at a time.
 
+Limits travel on `Prepared.limits` (the project's `ResourceLimits`; `None` under the container backend, whose `docker run` carries them as `--memory`, `--pids-limit`, `--cpus` and `--ulimit fsize`). `process::spawn` applies them between fork and exec: `RLIMIT_FSIZE`, and, when `cgroup::init()` set up a tree at startup, a write of `0` to the command's own `cgroup.procs`, opened beforehand. `patina-tools::cgroup` works only in a cgroup v2 subtree delegated to the daemon and holding no other process: it moves the daemon into `<own>/daemon`, enables `memory`, `pids` and `cpu` for `<own>` and `<own>/commands`, and gives each command `<own>/commands/<marker>` with `memory.max`, `memory.swap.max = 0`, `pids.max` and `cpu.max`. Stopping a command writes `cgroup.kill`; dropping it removes the cgroup. Each step that fails is undone. `Caps::resource_limits()` lists only the mechanisms in force, for the badge and `patina doctor`.
+
+Tool results pass through `RunHost::redact` in the agent loop before they are stored, broadcast or added to the history. The server's host holds a `Redactor` built at run start from every value in the secret store and every `env:` variable named by a provider or MCP server.
+
 The policy engine is `patina_core::policy::decide(mode, kind, command_allowed, sandboxed)`. The allowlist lives on the project, and a pattern added while approving reaches the live run through a shared `Allowlist`.
 
 ## Git and the worktree

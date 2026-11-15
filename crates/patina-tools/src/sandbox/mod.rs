@@ -2,7 +2,7 @@
 //!
 //! Selection fails closed: a backend that was asked for and cannot be set up is an error, never a silent
 //! downgrade to something weaker.
-use patina_core::sandbox::{Prepared, Sandbox, SandboxChoice, SandboxError, SandboxLevel, SandboxStatus};
+use patina_core::sandbox::{Prepared, ResourceLimits, Sandbox, SandboxChoice, SandboxError, SandboxLevel, SandboxStatus};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,6 +11,7 @@ pub mod container;
 #[cfg(target_os = "linux")]
 pub mod landlock;
 
+use crate::cgroup::CgroupState;
 use crate::process::MARKER_VAR;
 
 /// What one run's sandbox is built from.
@@ -37,6 +38,8 @@ pub struct Setup {
     pub protected: Vec<PathBuf>,
     /// The run's preview port. Commands get it as `PORT`, and may listen on it even when TCP is blocked.
     pub port: Option<u16>,
+    /// The project's caps on memory, processes, CPU and file size.
+    pub limits: ResourceLimits,
 }
 
 /// What the host was seen to support.
@@ -46,6 +49,8 @@ pub struct Caps {
     pub landlock_abi: Option<u32>,
     /// The container runtime that answered, as (program, version).
     pub runtime: Option<(String, String)>,
+    /// Whether commands get cgroup v2 limits.
+    pub cgroup: CgroupState,
 }
 
 impl Caps {
@@ -54,6 +59,7 @@ impl Caps {
         Caps {
             landlock_abi: landlock_abi(),
             runtime: container::detect_runtime().await,
+            cgroup: crate::cgroup::detect(),
         }
     }
 
@@ -101,15 +107,29 @@ impl Caps {
             _ if runtime.is_some() => "No Landlock on this host. A project with a container_image runs its commands in a container; any other project asks before every edit and command.".to_string(),
             _ => "No sandbox is available on this host, so every edit and command asks for approval.".to_string(),
         };
-        // Nothing is listed here unless it is enforced. cgroup limits are not implemented.
         SandboxStatus {
             level,
             landlock_abi: abi,
             tcp_block,
             container_runtime: runtime,
-            resource_limits: vec![],
+            resource_limits: self.resource_limits(),
             summary,
         }
+    }
+
+    /// The mechanisms that enforce a project's limits on this host. Nothing is listed unless it is enforced.
+    pub fn resource_limits(&self) -> Vec<String> {
+        let mut out = vec![];
+        if let CgroupState::Active(controllers) = &self.cgroup {
+            out.push(format!("{} per command (cgroup v2)", crate::cgroup::describe(controllers)));
+        }
+        if cfg!(unix) {
+            out.push("largest file a command may write (RLIMIT_FSIZE)".to_string());
+        }
+        if self.runtime.is_some() {
+            out.push("container backend: memory, processes, CPU and file size for the run's container".to_string());
+        }
+        out
     }
 }
 
@@ -179,6 +199,7 @@ impl Sandbox for NoSandbox {
             args,
             env,
             cwd: Some(self.setup.worktree.clone()),
+            limits: Some(self.setup.limits),
         })
     }
 }
@@ -225,6 +246,7 @@ mod tests {
         Caps {
             landlock_abi: abi,
             runtime: runtime.then(|| ("docker".to_string(), "27.0".to_string())),
+            cgroup: CgroupState::Unavailable("not delegated".into()),
         }
     }
 
@@ -269,7 +291,19 @@ mod tests {
             "{}",
             new.summary
         );
-        assert!(new.resource_limits.is_empty(), "no resource limit is enforced, so none is listed");
+        // Only what is enforced is listed: without a delegated cgroup, memory is capped only in a container.
+        assert_eq!(
+            caps(Some(6), false).resource_limits(),
+            ["largest file a command may write (RLIMIT_FSIZE)"]
+        );
+        let mut all = caps(Some(6), true);
+        all.cgroup = CgroupState::Active(vec!["memory".into(), "pids".into()]);
+        let listed = all.status().resource_limits;
+        assert_eq!(listed[0], "memory and processes per command (cgroup v2)");
+        assert!(listed[2].starts_with("container backend:"), "{listed:?}");
+        // A cgroup that could be used but was not set up enforces nothing.
+        all.cgroup = CgroupState::Possible(vec!["memory".into()]);
+        assert!(!all.resource_limits().iter().any(|l| l.contains("cgroup")));
         let none = caps(None, false).status();
         assert_eq!(none.level, SandboxLevel::None);
         assert!(none.summary.contains("every edit and command asks"));
