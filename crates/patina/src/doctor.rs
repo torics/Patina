@@ -107,12 +107,12 @@ fn sandbox_checks(c: &mut Checks, caps: &Caps) {
         None if caps.runtime.is_some() => c.add(
             "sandbox",
             Status::Note,
-            "No Landlock on this host. A project with a `container_image` runs its commands in a container; any other project asks before every edit and command.",
+            format!("{}A project with a `container_image` runs its commands in a container; any other project asks before every edit and command.", patina_tools::sandbox::no_landlock()),
         ),
         None => c.add(
             "sandbox",
             Status::Note,
-            "No sandbox is available on this host. Every edit and command asks for approval, and autopilot and `patina run --yes` are refused.",
+            format!("{}No sandbox is available. Every edit and command asks for approval, and autopilot and `patina run --yes` are refused.", patina_tools::sandbox::no_landlock()),
         ),
     }
     match &caps.runtime {
@@ -400,9 +400,12 @@ mod tests {
         );
         let none = lines(Caps::default());
         assert!(
-            none.contains("Note sandbox: No sandbox is available") && none.contains("`patina run --yes` are refused"),
+            none.contains("Note sandbox: ") && none.contains("No sandbox is available") && none.contains("`patina run --yes` are refused"),
             "{none}"
         );
+        if cfg!(not(target_os = "linux")) {
+            assert!(none.contains("not available on this operating system"), "{none}");
+        }
         // Limits are named only where they are enforced.
         assert!(
             old.contains("Note resource limits: No cgroup v2 limits: its cgroup is not delegated") && !old.contains("container backend"),
@@ -434,7 +437,7 @@ mod tests {
         std::fs::write(
             paths.config_dir.join("projects.toml"),
             format!(
-                "schema_version = 1\n[[project]]\nid = \"gone\"\nname = \"Gone\"\npath = \"{}\"\n",
+                "schema_version = 1\n[[project]]\nid = \"gone\"\nname = \"Gone\"\npath = '{}'\n",
                 t.path().join("missing").display()
             ),
         )

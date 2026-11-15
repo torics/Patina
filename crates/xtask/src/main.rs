@@ -17,6 +17,11 @@ fn run(cmd: &mut Command) {
     }
 }
 
+/// On Windows npm is a `.cmd` script, which `Command` finds only by its full name.
+fn npm() -> Command {
+    Command::new(if cfg!(windows) { "npm.cmd" } else { "npm" })
+}
+
 fn main() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let ui = root.join("ui");
@@ -25,8 +30,8 @@ fn main() {
         Some("ui") => {
             types(&root);
             let lock = if ui.join("node_modules").exists() { "install" } else { "ci" };
-            run(Command::new("npm").arg(lock).arg("--no-audit").arg("--no-fund").current_dir(&ui));
-            run(Command::new("npm").args(["run", "build"]).current_dir(&ui));
+            run(npm().arg(lock).arg("--no-audit").arg("--no-fund").current_dir(&ui));
+            run(npm().args(["run", "build"]).current_dir(&ui));
         }
         Some("types") => types(&root),
         _ => {

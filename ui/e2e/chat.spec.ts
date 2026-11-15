@@ -211,8 +211,14 @@ test("run an agent in a project, approve its edit after reading the diff, and me
   const sandbox = page.getByRole("region", { name: "Sandbox" });
   await expect(sandbox.getByRole("heading")).toContainText("Sandbox on this machine");
   // Only enforced limits are listed; without a delegated cgroup that is the file size cap (and a container's, if any).
-  await expect(sandbox).toContainText("Resource limits enforced here: largest file a command may write (RLIMIT_FSIZE)");
-  await expect(sandbox).not.toContainText("cgroup");
+  if (process.platform === "win32") {
+    // Windows has neither Landlock, cgroups nor RLIMIT_FSIZE, and the page says so instead of implying a sandbox.
+    await expect(sandbox).toContainText("The Linux sandbox (Landlock) and cgroup limits are not available on this operating system");
+    await expect(sandbox).not.toContainText("RLIMIT_FSIZE");
+  } else {
+    await expect(sandbox).toContainText("Resource limits enforced here: largest file a command may write (RLIMIT_FSIZE)");
+    await expect(sandbox).not.toContainText("cgroup");
+  }
 
   // Start a run in it.
   await page.getByRole("button", { name: "Workbench" }).click();

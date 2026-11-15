@@ -58,7 +58,7 @@ A sandboxed command with network access can send anything it can read to anywher
 
 - **An agent has only the tools named in its config**, and only in a run that has a project. A plain chat has no tools.
 - **Path confinement.** Every tool path is relative to the run's worktree. Symlinks are resolved first and the real path must be inside the worktree; absolute paths, `..`, symlinks that lead out and anything under `.git` are refused.
-- **No link is followed when a file is opened.** A background command of the same run could swap a folder for a symbolic link after the path was checked. Files are therefore opened from the worktree root one name at a time, following no link, so such a swap is refused instead of followed. Named pipes and devices are refused. (On Windows this second step is not available; no sandbox backend runs commands next to the tools there.)
+- **No link is followed when a file is opened.** A background command of the same run could swap a folder for a symbolic link after the path was checked. Files are therefore opened from the worktree root one name at a time, following no link, so such a swap is refused instead of followed. Named pipes and devices are refused. (On Windows this second step is not available. There is no sandbox there either, so every edit and command waits for your approval and nothing the agent starts runs unattended next to the tools.)
 - A known limit: while a background command swaps folders for links, `list_files` and `search` can list the names of files outside the worktree. They cannot return their content.
 
 ## Git

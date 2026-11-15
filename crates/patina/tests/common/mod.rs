@@ -115,7 +115,7 @@ pub fn without_sandbox(s: &Setup) {
     std::fs::write(
         s.config.join("projects.toml"),
         format!(
-            "schema_version = 1\n\n[[project]]\nid = \"repo\"\nname = \"repo\"\npath = \"{}\"\nsandbox = \"none\"\n",
+            "schema_version = 1\n\n[[project]]\nid = \"repo\"\nname = \"repo\"\npath = '{}'\nsandbox = \"none\"\n",
             path.display()
         ),
     )
@@ -168,7 +168,7 @@ pub fn project(s: &Setup, settings: &str) {
     std::fs::write(
         s.config.join("projects.toml"),
         format!(
-            "schema_version = 1\n\n[[project]]\nid = \"repo\"\nname = \"repo\"\npath = \"{}\"\n{settings}",
+            "schema_version = 1\n\n[[project]]\nid = \"repo\"\nname = \"repo\"\npath = '{}'\n{settings}",
             path.display()
         ),
     )

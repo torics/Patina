@@ -11,6 +11,25 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 pub const RUN_COMMAND: &str = "run_command";
+
+/// What the model is told about `run_command`: which shell reads the command line and whether a sandbox contains it.
+fn run_command_description(level: patina_core::sandbox::SandboxLevel) -> String {
+    use patina_core::sandbox::SandboxLevel;
+    let shell = if cfg!(windows) && level != SandboxLevel::Container {
+        "This is Windows: the command line runs with cmd.exe (cmd /C), so use Windows commands (dir, type, copy, set) and `&&` \
+         to chain; POSIX tools such as ls, cat or grep may be missing."
+    } else {
+        "The command line runs with /bin/sh."
+    };
+    let containment = match level {
+        SandboxLevel::None => "There is no sandbox, so the owner approves each command.",
+        _ => "Commands run in a sandbox: they can change files only inside the workspace.",
+    };
+    format!(
+        "Run a shell command from the workspace root and return its exit code and output. {shell} {containment} \
+         Use background for long-running processes such as a dev server."
+    )
+}
 pub const DEFAULT_TIMEOUT_S: u64 = 120;
 pub const MAX_TIMEOUT_S: u64 = 600;
 /// How many background processes one run may have at a time.
@@ -215,8 +234,7 @@ impl Tool for RunCommand {
     fn spec(&self) -> ToolSpec {
         spec(
             RUN_COMMAND,
-            "Run a shell command from the workspace root and return its exit code and output. Commands run in a sandbox: \
-             they can change files only inside the workspace. Use background for long-running processes such as a dev server.",
+            &run_command_description(self.0.sandbox.level()),
             json!({
                 "command": {"type": "string", "description": "The shell command line."},
                 "timeout_s": {"type": "integer", "minimum": 1, "maximum": MAX_TIMEOUT_S, "description": "Seconds before the command is stopped. Default 120, at most 600."},

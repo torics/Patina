@@ -377,7 +377,21 @@ async fn shutdown_signal() {
             _ = term.recv() => {}
         }
     }
-    #[cfg(not(unix))]
+    // On Windows, Ctrl+C, closing the console window, signing out and shutting down all stop the daemon cleanly.
+    #[cfg(windows)]
+    {
+        use tokio::signal::windows::{ctrl_close, ctrl_logoff, ctrl_shutdown};
+        let mut close = ctrl_close().expect("console close handler");
+        let mut logoff = ctrl_logoff().expect("logoff handler");
+        let mut shutdown = ctrl_shutdown().expect("shutdown handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = close.recv() => {}
+            _ = logoff.recv() => {}
+            _ = shutdown.recv() => {}
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     let _ = tokio::signal::ctrl_c().await;
     tracing::info!("shutting down");
 }

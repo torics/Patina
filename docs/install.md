@@ -54,6 +54,8 @@ Back on the Workbench, pick the agent and send a prompt. To let it work on code,
 
 ## Keep it running
 
+- Windows: run `patina.exe serve` in a terminal window. What differs from Linux (no sandbox, `cmd.exe`) is in
+  [windows.md](windows.md).
 - Linux: a systemd user unit, which also turns on per-command resource limits. See [systemd.md](systemd.md).
 - From your phone or another computer: [remote.md](remote.md).
 - What to back up: [backup.md](backup.md).

@@ -3,6 +3,7 @@
 mod common;
 use common::*;
 use serde_json::{Value, json};
+#[cfg(unix)]
 use std::time::Duration;
 
 async fn kill(d: &mut Daemon) {
@@ -95,6 +96,7 @@ async fn a_daemon_killed_mid_run_is_restarted_and_the_run_resumes_to_completion(
         .to_string();
     c.wait_status(&d, &run, "waiting_approval").await;
     kill(&mut d).await;
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let (mut d, _) = serve(&s).await;
     let view = c.get(&d, &format!("/runs/{run}")).await;
     assert_eq!(view["status"], "waiting_approval", "a waiting run keeps waiting: {view}");
@@ -118,28 +120,32 @@ async fn a_daemon_killed_mid_run_is_restarted_and_the_run_resumes_to_completion(
     assert_eq!(git(&s.repo, &["show", &format!("{branch}:NOTES.md")]), "written after a restart");
     assert!(!s.repo.join("NOTES.md").exists());
 
-    // 3. Stopped cleanly with SIGTERM while the model is answering: the run records that it was interrupted.
-    let run = c
-        .post(
-            &d,
-            "/runs",
-            json!({"agent_id": "dev", "prompt": "Take your time", "project_id": "repo"}),
-        )
-        .await["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    wait_for(&seen, 6).await;
-    let pid = d.child.id().unwrap().to_string();
-    assert!(std::process::Command::new("kill").args(["-TERM", &pid]).status().unwrap().success());
-    let exit = tokio::time::timeout(Duration::from_secs(30), d.child.wait())
-        .await
-        .expect("the daemon stops within 30 seconds")
-        .unwrap();
-    assert!(exit.success(), "{exit:?}");
-    let (d, _) = serve(&s).await;
-    let view = c.get(&d, &format!("/runs/{run}")).await;
-    assert_eq!(view["status"], "interrupted", "{view}");
-    c.post(&d, &format!("/runs/{run}/resume"), json!({})).await;
-    c.wait_status(&d, &run, "completed").await;
+    // 3. Windows has no SIGTERM to send a child; the clean stop there is Ctrl+C or closing the console.
+    #[cfg(unix)]
+    {
+        // 3. Stopped cleanly with SIGTERM while the model is answering: the run records that it was interrupted.
+        let run = c
+            .post(
+                &d,
+                "/runs",
+                json!({"agent_id": "dev", "prompt": "Take your time", "project_id": "repo"}),
+            )
+            .await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        wait_for(&seen, 6).await;
+        let pid = d.child.id().unwrap().to_string();
+        assert!(std::process::Command::new("kill").args(["-TERM", &pid]).status().unwrap().success());
+        let exit = tokio::time::timeout(Duration::from_secs(30), d.child.wait())
+            .await
+            .expect("the daemon stops within 30 seconds")
+            .unwrap();
+        assert!(exit.success(), "{exit:?}");
+        let (d, _) = serve(&s).await;
+        let view = c.get(&d, &format!("/runs/{run}")).await;
+        assert_eq!(view["status"], "interrupted", "{view}");
+        c.post(&d, &format!("/runs/{run}/resume"), json!({})).await;
+        c.wait_status(&d, &run, "completed").await;
+    }
 }

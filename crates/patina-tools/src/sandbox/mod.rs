@@ -101,11 +101,25 @@ impl Caps {
             (SandboxLevel::Landlock, Some(a)) => format!(
                 "Landlock (ABI {a}{}): commands can write only to the run's worktree and its own home and temp folders, and cannot read your home folder or Patina's data. {}{}",
                 if a >= 6 { " or later" } else { "" },
-                if tcp_block { "TCP can be blocked per project; UDP cannot. " } else { "Network access cannot be restricted. " },
-                if a >= 6 { "Commands cannot signal processes outside the sandbox." } else { "Commands can still signal your other processes (that needs ABI 6)." },
+                if tcp_block {
+                    "TCP can be blocked per project; UDP cannot. "
+                } else {
+                    "Network access cannot be restricted. "
+                },
+                if a >= 6 {
+                    "Commands cannot signal processes outside the sandbox."
+                } else {
+                    "Commands can still signal your other processes (that needs ABI 6)."
+                },
             ),
-            _ if runtime.is_some() => "No Landlock on this host. A project with a container_image runs its commands in a container; any other project asks before every edit and command.".to_string(),
-            _ => "No sandbox is available on this host, so every edit and command asks for approval.".to_string(),
+            _ if runtime.is_some() => format!(
+                "{}A project with a container_image runs its commands in a container; any other project asks before every edit and command.",
+                no_landlock()
+            ),
+            _ => format!(
+                "{}No sandbox is available on this host, so every edit and command asks for approval.",
+                no_landlock()
+            ),
         };
         SandboxStatus {
             level,
@@ -141,6 +155,15 @@ fn landlock_abi() -> Option<u32> {
 #[cfg(not(target_os = "linux"))]
 fn landlock_abi() -> Option<u32> {
     None
+}
+
+/// Why there is no Landlock here, in words that name the real reason.
+pub fn no_landlock() -> &'static str {
+    if cfg!(target_os = "linux") {
+        "No Landlock on this host. "
+    } else {
+        "The Linux sandbox (Landlock) and cgroup limits are not available on this operating system. "
+    }
 }
 
 /// Whether `a` contains `b`, is `b`, or sits inside `b`.
@@ -192,7 +215,20 @@ impl Sandbox for NoSandbox {
             .or_else(|| std::env::var_os("USERPROFILE"))
             .map(PathBuf::from)
             .unwrap_or_else(|| self.setup.home.clone());
-        let env = base_env(&self.setup, &home, marker);
+        #[cfg_attr(not(windows), allow(unused_mut))]
+        let mut env = base_env(&self.setup, &home, marker);
+        // Windows programs need a few more variables to start at all (Python, for one, fails without SystemRoot).
+        #[cfg(windows)]
+        {
+            for name in WINDOWS_ENV {
+                if let Some(v) = std::env::var_os(name).filter(|v| !v.is_empty()) {
+                    env.push((name.to_string(), v.to_string_lossy().into_owned()));
+                }
+            }
+            let tmp = self.setup.tmp.to_string_lossy().into_owned();
+            env.push(("TEMP".into(), tmp.clone()));
+            env.push(("TMP".into(), tmp));
+        }
         let (program, args) = shell(command);
         Ok(Prepared {
             program,
@@ -203,6 +239,27 @@ impl Sandbox for NoSandbox {
         })
     }
 }
+
+/// What a Windows program needs from the environment to start, beyond `PATH`. Nothing secret.
+#[cfg(windows)]
+const WINDOWS_ENV: &[&str] = &[
+    "PATHEXT",
+    "SystemRoot",
+    "SystemDrive",
+    "windir",
+    "ComSpec",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "ProgramData",
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+    "CommonProgramFiles",
+    "USERNAME",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+    "OS",
+];
 
 #[cfg(unix)]
 pub(crate) fn shell(command: &str) -> (PathBuf, Vec<String>) {
@@ -292,15 +349,18 @@ mod tests {
             new.summary
         );
         // Only what is enforced is listed: without a delegated cgroup, memory is capped only in a container.
-        assert_eq!(
-            caps(Some(6), false).resource_limits(),
-            ["largest file a command may write (RLIMIT_FSIZE)"]
-        );
+        // RLIMIT_FSIZE exists only on Unix; on Windows nothing is enforced without a container.
+        let expected: &[&str] = if cfg!(unix) {
+            &["largest file a command may write (RLIMIT_FSIZE)"]
+        } else {
+            &[]
+        };
+        assert_eq!(caps(Some(6), false).resource_limits(), expected);
         let mut all = caps(Some(6), true);
         all.cgroup = CgroupState::Active(vec!["memory".into(), "pids".into()]);
         let listed = all.status().resource_limits;
         assert_eq!(listed[0], "memory and processes per command (cgroup v2)");
-        assert!(listed[2].starts_with("container backend:"), "{listed:?}");
+        assert!(listed.last().unwrap().starts_with("container backend:"), "{listed:?}");
         // A cgroup that could be used but was not set up enforces nothing.
         all.cgroup = CgroupState::Possible(vec!["memory".into()]);
         assert!(!all.resource_limits().iter().any(|l| l.contains("cgroup")));

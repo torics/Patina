@@ -336,8 +336,8 @@ function SandboxCard() {
       </h3>
       <p>{s.summary}</p>
       <ul class="facts">
-        <li>Landlock file confinement: {s.landlock_abi === null ? "not available" : `available (ABI ${s.landlock_abi}${s.landlock_abi >= 6 ? " or later" : ""})`}</li>
-        <li>Blocking TCP for a project without network: {s.tcp_block ? "available. UDP is never blocked, so this is not full network isolation" : "not available under Landlock on this kernel"}</li>
+        <li>Landlock file confinement: {s.landlock_abi === null ? "not available on this machine" : `available (ABI ${s.landlock_abi}${s.landlock_abi >= 6 ? " or later" : ""})`}</li>
+        <li>Blocking TCP for a project without network: {s.tcp_block ? "available. UDP is never blocked, so this is not full network isolation" : s.landlock_abi === null ? "not available (it needs Landlock)" : "not available under Landlock on this kernel"}</li>
         <li>Container runtime: {s.container_runtime ?? "none found"}</li>
         <li>Resource limits enforced here: {s.resource_limits.length ? s.resource_limits.join("; ") : "none"}</li>
       </ul>

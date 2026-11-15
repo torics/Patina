@@ -7,6 +7,13 @@ use serde_json::{Value, json};
 
 const TOOLS: [&str; 3] = ["read_file", "write_file", "run_command"];
 
+/// Two commands in one line, in the shell Patina runs commands with: `sh` on Unix, `cmd` on Windows.
+const ECHO_AND_READ: &str = if cfg!(windows) {
+    "echo hello& type key.txt"
+} else {
+    "echo hello; cat key.txt"
+};
+
 async fn events_of(d: &Daemon, run: &str) -> Vec<Value> {
     d.events(run, "", None).await.1
 }
@@ -14,7 +21,7 @@ async fn events_of(d: &Daemon, run: &str) -> Vec<Value> {
 #[tokio::test]
 async fn a_command_asks_first_without_a_sandbox_and_its_pattern_joins_the_allowlist() {
     let scripts = vec![
-        Script::tool_calls(&[("c1", "run_command", json!({"command": "echo hello; cat key.txt"}))]),
+        Script::tool_calls(&[("c1", "run_command", json!({"command": ECHO_AND_READ}))]),
         Script::tool_calls(&[("c2", "write_file", json!({"path": "b.txt", "content": "x\n"}))]),
         Script::tool_calls(&[("c3", "run_command", json!({"command": "echo again"}))]),
         Script::text("Done."),
@@ -69,10 +76,10 @@ async fn a_command_asks_first_without_a_sandbox_and_its_pattern_joins_the_allowl
 
     let events = events_of(&d, &run).await;
     assert_eq!(events[0]["payload"]["sandbox"], "none");
-    let results: Vec<&str> = events
+    let results: Vec<String> = events
         .iter()
         .filter(|e| e["type"] == "tool_result" && e["payload"]["name"] == "run_command")
-        .map(|e| e["payload"]["content"].as_str().unwrap())
+        .map(|e| e["payload"]["content"].as_str().unwrap().replace("\r\n", "\n"))
         .collect();
     assert_eq!(
         results,
@@ -97,6 +104,8 @@ async fn project_settings_are_checked_before_they_are_saved() {
     let (d, _repo) = workbench(vec![Script::text("never asked")], &TOOLS).await;
     let patch = |body: Value| d.send(reqwest::Method::PATCH, "/projects/site", body);
     let data = d.dir.path().join("data").canonicalize().unwrap();
+    // The file system root: `/`, or the drive Patina's data is on.
+    let root: std::path::PathBuf = data.components().take(if cfg!(windows) { 2 } else { 1 }).collect();
 
     for (body, code, says) in [
         (json!({"policy": "autopilot"}), 409, "autopilot needs a sandbox"),
@@ -107,7 +116,11 @@ async fn project_settings_are_checked_before_they_are_saved() {
             400,
             "Patina's own config or data folder",
         ),
-        (json!({"sandbox_read": ["/"]}), 400, "Patina's own config or data folder"),
+        (
+            json!({"sandbox_read": [root.to_str().unwrap()]}),
+            400,
+            "Patina's own config or data folder",
+        ),
         (json!({"env": {"HOME": "/root"}}), 400, "set by Patina"),
         (json!({"sandbox": "container"}), 400, "container_image"),
         (json!({"path": "/somewhere/else"}), 400, "not a project setting that can be changed"),
@@ -183,7 +196,12 @@ async fn the_system_page_reports_the_sandbox_and_the_command_tool() {
     assert_eq!(sys["sandbox"]["level"], "none");
     assert!(
         sys["sandbox"]["landlock_abi"].is_null()
-            && sys["sandbox"]["resource_limits"] == json!(["largest file a command may write (RLIMIT_FSIZE)"]),
+            && sys["sandbox"]["resource_limits"]
+                == if cfg!(unix) {
+                    json!(["largest file a command may write (RLIMIT_FSIZE)"])
+                } else {
+                    json!([])
+                },
         "only the limits that are enforced are listed: {sys}"
     );
     assert!(sys["sandbox"]["summary"].as_str().unwrap().contains("every edit and command asks"));

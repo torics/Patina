@@ -23,6 +23,9 @@ process-wrap = { version = "10", default-features = false, features = ["tokio1",
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["fs", "process", "thread"] }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"
 

@@ -202,6 +202,15 @@
 - `reqwest` becomes a direct dependency of the `patina` binary crate for `version --check`. It was already linked through the providers, so the size did not change.
 - Build tools only, not in the binary: `cargo-about` 0.9 and `cargo-zigbuild` with Zig in the release workflow, `cargo-bloat` for the size review.
 
+## Windows choices
+
+- On Windows a command runs with `cmd /C`, and `run_command`'s description tells the model so (and whether a sandbox contains it), so it writes `dir` and `type`, not `ls` and `cat`. Git Bash or PowerShell would suit models better but are not always installed; `cmd` always is.
+- Without a sandbox, a command on Windows keeps the variables a program needs to start (`SystemRoot`, `ComSpec`, `PATHEXT`, the profile folders and a few more); `TEMP` and `TMP` point at the run's temp folder, like `TMPDIR`. None of them holds a secret.
+- File paths in the API and in tool results always use `/`, so a path the UI or an agent got back can be sent again and compared with git's.
+- A run's owning process is identified by its PID and creation time on Windows too, so a live process is never mistaken for a dead one at the next start.
+- Ctrl+C, closing the console window, signing out and shutting down stop the daemon cleanly; running runs are recorded as interrupted.
+- doctor, Settings and the sandbox summary say on Windows that Landlock and cgroup limits are not available on that operating system, rather than "on this host".
+
 ## Open risks
 - Live checks passed on 2026-11-15 for Gemini (streaming, a tool call, reasoning replay) and for a hosted OpenAI-compatible endpoint (Meta's Muse API: streaming and a tool call). Anthropic, OpenAI and a local endpoint have not been checked live yet.
 - Memory, process and CPU limits per command need a delegated cgroup (a systemd unit with `Delegate=yes`). Started from a shell, Patina caps only file size outside a container, and says so. The cgroup code is tested in CI only (a scope from `systemd-run`, as root); this build machine has the legacy hierarchy.
@@ -220,5 +229,5 @@
 - Under the container backend, a dev server must listen on all of the container's addresses (for example `--host 0.0.0.0`) to be reachable through the published port.
 - MCP is tested against a hand-written stdio server and rmcp's own HTTP server, not yet against third-party servers or a real model choosing MCP tools. Gemini rejects some JSON Schema keywords; a server whose schema uses them may fail with that provider.
 - A stdio MCP server's own children that leave its process group are not stopped with it, and on Windows the job object is untested.
-- Release builds for macOS and Windows compile in CI but are not exercised there beyond the build; the Windows binary has no process-tree kill and no sandbox but the container backend. Binaries are not code-signed.
+- Windows x64 is built and tested in CI on every push: clippy, the Rust tests and the browser tests against `patina.exe` (the browser test of a sandboxed command is skipped, since Windows has no sandbox). The Windows binary has no process-tree kill and no sandbox but the container backend, which is untested there. macOS builds compile in the release workflow only. Binaries are not code-signed.
 - `patina version --check` and the install script's links need the repository to be public; while it is private, use `gh release download`.

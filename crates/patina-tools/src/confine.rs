@@ -185,9 +185,17 @@ impl Workspace {
         }
     }
 
-    /// The path relative to the root, for display.
+    /// The path relative to the root, for display and for the API. Always with `/`, also on Windows, so a path
+    /// the UI or an agent got back can be passed in again and compared with git's paths.
     pub fn display(&self, full: &Path) -> String {
-        full.strip_prefix(&self.root).unwrap_or(full).display().to_string()
+        match full.strip_prefix(&self.root) {
+            Ok(rel) => rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/"),
+            Err(_) => full.display().to_string(),
+        }
     }
 
     pub fn remember(&self, full: &Path, bytes: &[u8]) {
