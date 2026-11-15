@@ -308,6 +308,7 @@ pub async fn run(paths: Paths, args: RunArgs) -> Result<u8> {
         prompt: args.prompt.clone(),
         project_id: Some(project.id.clone()),
         budgets: Some(budgets),
+        attachments: vec![],
     };
     let (row, handle) = engine::start_run(&st, input).await.map_err(api)?;
     if !args.json {

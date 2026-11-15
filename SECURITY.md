@@ -89,7 +89,7 @@ The **allowlist** saves you a question; it is not a security control. A pattern 
 - **CSRF**: every state-changing request needs the `X-Patina-CSRF` header matching the session, and an `Origin` that names the same host.
 - **Host check**: any request whose `Host` is not in `allowed_hosts` is refused. This defends against DNS rebinding.
 - **Bind**: `127.0.0.1` by default. A non-loopback bind is refused unless a password is set and a non-localhost name is in `allowed_hosts`.
-- **Headers**: `Content-Security-Policy: default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`, plus `nosniff`, `no-referrer` and `X-Frame-Options: DENY`.
+- **Headers**: `Content-Security-Policy: default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`, plus `frame-src` naming only the preview origin, `nosniff`, `no-referrer` and `X-Frame-Options: DENY`. No `unsafe-inline` anywhere: the editor styles itself with constructed style sheets inside a shadow root.
 - **Keys never reach the browser.** The API accepts a key and never returns it; the UI shows the last four characters. Model output, file content and command output are rendered as text.
 - **Patina's folders cannot be a project**: a folder that contains or sits inside the config or data folder is refused.
 - **Budgets** stop a run at its step, token or time limit, and at its cost limit where the model has a configured price.
@@ -114,6 +114,14 @@ This protects backups and copied database files. It does not protect against a c
 - Members of a parallel team get read tools only. Their answers reach the synthesizer as data, marked as notes from colleagues, not instructions from the owner. The same holds for hand-offs between sequential members and for a sub-agent's final message.
 - An exported team file names providers by id and never carries a key.
 
+## Workbench and preview
+
+- **Files**: the editor's routes resolve every path through the tools' confinement, so they cannot leave the project or the run's worktree, follow a link out, or touch `.git`. A run's files can be edited only while no agent works in it, and every such save is a commit you can see in the diff.
+- **Attachments** (`@path`) are read from your checkout with the same rules and sent to the model with the prompt. Mention only what you would paste yourself.
+- **The preview listener** binds to `127.0.0.1` whatever `--bind` says, checks `Host` against `allowed_hosts`, and serves only the run you selected. It has no login of its own: anyone who can reach the port on this machine, or through a tunnel you set up, can load the dev server, as they could reach a dev server you started by hand. It never forwards your session cookie, the CSRF header or an `Authorization` header, and strips `Set-Cookie` and CORS headers from responses, so the dev server cannot set cookies for the app's host name and other web pages cannot read the preview.
+- **The preview frame** is sandboxed without `allow-same-origin` and loads from another origin (another port), so code the agent wrote cannot reach the app, its cookies or its API.
+- **The dev command** runs in the run's sandbox, as the agent's commands do, with the same limits. It is code the agent may have written: without a sandbox it runs as you, and starting it is your decision.
+
 ## Not in place yet
 
 - Resource limits for commands (cgroup v2), planned for the hardening milestone.
@@ -122,7 +130,7 @@ This protects backups and copied database files. It does not protect against a c
 
 ## Outbound calls
 
-The daemon calls only the providers you configure. Commands an agent runs can call anything the project's network setting allows.
+The daemon calls only the providers you configure, and the preview proxy calls only `127.0.0.1` on the selected run's port. Commands an agent runs can call anything the project's network setting allows.
 
 ## Reporting a problem
 

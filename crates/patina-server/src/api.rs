@@ -273,5 +273,7 @@ pub async fn system(State(st): St) -> Json<SystemInfo> {
         sandbox: st.caps().await.status(),
         tools: patina_tools::tool_names().iter().map(|t| t.to_string()).collect(),
         retention_days: st.config.retention_days,
+        preview_port: st.preview.addr.get().map(|a| a.port()),
+        preview_origin: st.config.preview_origin.clone(),
     })
 }

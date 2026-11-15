@@ -45,7 +45,8 @@ async fn blocking(f: impl FnOnce() -> ToolOutput + Send + 'static) -> ToolOutput
         .unwrap_or_else(|e| ToolOutput::error(format!("tool crashed: {e}")))
 }
 
-fn is_binary(bytes: &[u8]) -> bool {
+/// True for content that is not UTF-8 text.
+pub fn is_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(8192).any(|b| *b == 0) || std::str::from_utf8(bytes).is_err()
 }
 
@@ -58,6 +59,22 @@ fn walker(root: &std::path::Path, depth: Option<usize>) -> WalkBuilder {
         .sort_by_file_name(|a, b| a.cmp(b))
         .filter_entry(|e| e.file_name() != ".git");
     b
+}
+
+/// Every file under the workspace root as a relative path, sorted, honoring `.gitignore`, at most `limit` of
+/// them. The second value is true when the listing stopped at the limit.
+pub fn list_all(ws: &Workspace, limit: usize) -> (Vec<String>, bool) {
+    let mut files = Vec::new();
+    for entry in walker(ws.root(), None).build().flatten() {
+        if !entry.file_type().is_some_and(|t| t.is_file() || t.is_symlink()) {
+            continue;
+        }
+        if files.len() == limit {
+            return (files, true);
+        }
+        files.push(ws.display(entry.path()));
+    }
+    (files, false)
 }
 
 pub struct ListFiles(Arc<Workspace>);

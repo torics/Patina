@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Event } from "./api/generated/Event";
-import { applyDelta, applyEvent, delegated, emptyTimeline, isActive, isTerminal, topBlocks, visibleText, waitingApprovals, type ToolItem } from "./reducer";
+import { applyDelta, applyEvent, delegated, emptyTimeline, isActive, isTerminal, mentions, splitPrompt, topBlocks, visibleText, waitingApprovals, type ToolItem } from "./reducer";
 
 let seq = 0;
 function ev(type: string, payload: Record<string, any> = {}, agent: string | null = "a"): Event {
@@ -322,5 +322,25 @@ describe("event reducer", () => {
       ev("agent_finished", { status: "completed" }),
     ]);
     expect(t.blocks[0].errors).toEqual([{ message: "The model ended its turn without an answer.", retrying: false }]);
+  });
+
+  it("counts an owner's edit as a change and remembers the file", () => {
+    seq = 0;
+    const t = build([ev("run_started", {}, null), ev("run_finished", { status: "completed" }, null), ev("owner_edit", { path: "src/a.ts", commit: "abc" }, null)]);
+    expect(t.edits).toEqual(["src/a.ts"]);
+    expect(t.changes).toBe(2);
+  });
+});
+
+describe("prompts with attached files", () => {
+  it("splits the typed prompt from the attached files", () => {
+    const prompt = 'Fix @src/a.ts\n\n<attached_file path="src/a.ts">\nlet a = 1;\n</attached_file>\n\n<attached_file path="say \\"hi\\".md">\nhi\n</attached_file>';
+    expect(splitPrompt(prompt)).toEqual({ text: "Fix @src/a.ts", attachments: ["src/a.ts", 'say "hi".md'] });
+    expect(splitPrompt("plain")).toEqual({ text: "plain", attachments: [] });
+  });
+
+  it("finds the mentions that name known files, once each", () => {
+    const files = ["src/a.ts", "README.md"];
+    expect(mentions("Read @README.md, then fix @src/a.ts and @src/a.ts. Not @nope or me@README.md", files)).toEqual(["README.md", "src/a.ts"]);
   });
 });

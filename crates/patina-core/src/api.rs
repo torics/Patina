@@ -131,6 +131,9 @@ pub struct NewRun {
     pub project_id: Option<String>,
     #[serde(default)]
     pub budgets: Option<Budgets>,
+    /// Files of the project, as relative paths, whose content is added to the prompt (`@path` mentions).
+    #[serde(default)]
+    pub attachments: Vec<String>,
 }
 
 /// A project with what its sandbox setting means on this host.
@@ -270,6 +273,11 @@ pub struct SystemInfo {
     pub tools: Vec<String>,
     /// Logs of runs that ended more than this many days ago are removed. 0 keeps them. Set in `config.toml`.
     pub retention_days: u32,
+    /// The port of the preview listener on the daemon's host, or null when it is off.
+    pub preview_port: Option<u16>,
+    /// Where the browser loads the preview from, when the owner configured it. Otherwise it is the app's own
+    /// host name on `preview_port`.
+    pub preview_origin: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -345,4 +353,60 @@ pub struct TeamImported {
     pub team: crate::team_config::TeamConfig,
     /// Agents written from the file. Agents identical to the file are left alone and not listed.
     pub agents_written: Vec<String>,
+}
+
+/// The files of a project or of a run's worktree, as relative paths. Folders are implied by the paths.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct FileTree {
+    pub files: Vec<String>,
+    /// True when the listing stopped at its limit.
+    pub truncated: bool,
+}
+
+/// One text file of a project or of a run's worktree.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct FileContent {
+    pub path: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct FileWrite {
+    pub content: String,
+}
+
+/// One file as it was at the run's base commit and as it is on the run's branch. Null where it does not exist
+/// or is not text.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct FileDiffView {
+    pub path: String,
+    pub before: Option<String>,
+    pub after: Option<String>,
+}
+
+/// What the preview listener serves: the dev server of one run, on that run's port.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PreviewView {
+    /// The run the preview shows, or null when none is selected.
+    pub run_id: Option<String>,
+    /// The run's port. Its commands get it as `PORT`, and `{port}` in the project's `dev_command` becomes it.
+    pub port: Option<u16>,
+    /// The project's dev command with the port filled in, if the project has one.
+    pub dev_command: Option<String>,
+    /// True while the dev command that Patina started is running.
+    pub running: bool,
+    /// The last output of that dev command.
+    pub output: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PreviewSelect {
+    /// The run to preview, or null to stop previewing.
+    pub run_id: Option<String>,
 }

@@ -177,6 +177,7 @@ pub async fn merge(State(st): St, Path(id): Path<String>) -> ApiResult<Json<Merg
     let repo = PathBuf::from(st.project(&run.project_id)?.path);
     let into_branch = git::current_branch(&repo).await.map_err(git_err)?;
     let merged = git::merge(&repo, &branch).await.map_err(git_err)?;
+    st.preview.forget(&id).await;
     // The work is on the owner's branch now: remove the worktree and the run branch.
     if let Some(w) = &run.worktree_path {
         git::remove_worktree(&repo, &PathBuf::from(w)).await.map_err(git_err)?;
@@ -204,6 +205,7 @@ pub async fn discard(State(st): St, Path(id): Path<String>, Json(input): Json<Di
         .clone()
         .ok_or_else(|| ApiError::conflict("no_changes", "this run has no branch"))?;
     let repo = PathBuf::from(st.project(&run.project_id)?.path);
+    st.preview.forget(&id).await;
     if let Some(w) = &run.worktree_path {
         git::remove_worktree(&repo, &PathBuf::from(w)).await.map_err(git_err)?;
     }

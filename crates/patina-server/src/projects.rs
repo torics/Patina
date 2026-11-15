@@ -145,7 +145,7 @@ pub async fn register(st: &AppState, input: NewProject) -> ApiResult<ProjectConf
 }
 
 /// The settings of a project that the API can change. The id and the folder stay as they are.
-const SETTINGS: [&str; 12] = [
+const SETTINGS: [&str; 13] = [
     "name",
     "policy",
     "sandbox",
@@ -158,6 +158,7 @@ const SETTINGS: [&str; 12] = [
     "worktree_copy",
     "worktree_copy_secrets",
     "worktree_setup",
+    "dev_command",
 ];
 
 /// Change a project's settings. Only the fields that are sent change; `null` puts a field back to its default.

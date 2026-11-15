@@ -125,8 +125,8 @@ async fn commands_cannot_read_or_write_outside_their_run() {
         .collect();
     assert_eq!(
         names.len(),
-        6,
-        "only PATH, LANG, TERM, HOME, TMPDIR and the marker are set (plus the shell's own): {names:?}"
+        7,
+        "only PATH, LANG, TERM, HOME, TMPDIR, PORT and the marker are set (plus the shell's own): {names:?}"
     );
     // Inside its own folders the command works normally.
     assert!(r[4].0.contains("inside") && r[4].0.contains("wrote") && !r[4].1, "{}", r[4].0);
@@ -326,6 +326,33 @@ async fn a_project_without_network_cannot_open_tcp_connections() {
         let out = &ran.results("run_command")[0].0;
         assert_eq!(out.contains("CONNECTED"), network, "network = {network}: {out}");
     }
+}
+
+#[tokio::test]
+async fn without_network_a_command_may_still_listen_on_the_runs_preview_port() {
+    let Some(abi) = landlock() else { return };
+    if abi < 4 {
+        eprintln!("NOTICE: this kernel's Landlock cannot block TCP, so there is no port rule to test.");
+        return;
+    }
+    let bind = |port: &str, label: &str| {
+        format!("python3 -c \"import socket; s = socket.socket(); s.bind(('127.0.0.1', {port})); print('{label}')\"")
+    };
+    let command = format!(
+        "echo port=$PORT; {}; {}; echo end",
+        bind("int(__import__('os').environ['PORT'])", "BOUND-PREVIEW-PORT"),
+        bind("0", "BOUND-ANOTHER-PORT")
+    );
+    let s = setup(fake_model(vec![runs(&command, json!({})), says("Done.")]).await);
+    with_commands(&s);
+    project(&s, "policy = \"autopilot\"\nnetwork = false\n");
+    let ran = run_json(&s, &[], &["Listen"]).await;
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    let out = &ran.results("run_command")[0].0;
+    assert!(out.contains("port=") && !out.contains("port=\n"), "{out}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(lines.contains(&"BOUND-PREVIEW-PORT"), "{out}");
+    assert!(!lines.contains(&"BOUND-ANOTHER-PORT") && out.contains("PermissionError"), "{out}");
 }
 
 #[tokio::test]

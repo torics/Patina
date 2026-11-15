@@ -213,7 +213,7 @@ test("run an agent in a project, approve its edit after reading the diff, and me
   await expect(sandbox).toContainText("Memory, CPU and process limits: none enforced");
 
   // Start a run in it.
-  await page.getByRole("button", { name: "Chat" }).click();
+  await page.getByRole("button", { name: "Workbench" }).click();
   await page.getByLabel("Project").selectOption("repo");
   await page.getByLabel("Prompt", { exact: true }).fill("Write the notes");
   await page.getByRole("button", { name: "Send" }).click();
@@ -266,14 +266,14 @@ test("a command runs in the sandbox, and approving it can put it on the allowlis
   await approvals.selectOption("auto_edit");
   await expect(page.locator("li.card", { hasText: "repo" }).locator(".badge")).toHaveText(/sandbox: (landlock|container)/);
 
-  await page.getByRole("button", { name: "Chat" }).click();
+  await page.getByRole("button", { name: "Workbench" }).click();
   await page.getByLabel("Project").selectOption("repo");
   await page.getByLabel("Prompt", { exact: true }).fill("Run the tests");
   await page.getByRole("button", { name: "Send" }).click();
 
   const approval = page.getByRole("group", { name: "Approval for run_command" });
   await expect(approval).toBeVisible();
-  await expect(page.locator(".timeline .badge")).toHaveText(/^Sandbox: /);
+  await expect(page.locator(".runbar .badge")).toHaveText(/^Sandbox: /);
   await approval.getByText("Always allow commands like this").click();
   await expect(approval.getByLabel(/^Pattern for this project/)).toHaveValue("echo tests *");
   await approval.getByRole("button", { name: "Approve and always allow" }).click();
@@ -288,7 +288,7 @@ test("a command runs in the sandbox, and approving it can put it on the allowlis
   await expect(page.locator("textarea[name=allow_commands]")).toHaveValue("echo tests *");
 
   // The same command no longer asks.
-  await page.getByRole("button", { name: "Chat" }).click();
+  await page.getByRole("button", { name: "Workbench" }).click();
   await page.getByRole("button", { name: "New chat" }).click();
   await page.getByLabel("Project").selectOption("repo");
   await page.getByLabel("Prompt", { exact: true }).fill("Run the tests again");
@@ -371,7 +371,7 @@ test("teams: from a template and by hand, with a sub-agent shown under its deleg
   await expect(page.getByRole("link", { name: "Export Lead" })).toHaveAttribute("href", "/api/v1/teams/lead/export");
 
   // The sequential team: three agents, one after another, each in its own block.
-  await page.getByRole("button", { name: "Chat" }).click();
+  await page.getByRole("button", { name: "Workbench" }).click();
   if (await page.getByRole("button", { name: "New chat" }).count()) await page.getByRole("button", { name: "New chat" }).click();
   await page.getByLabel("Team or agent").selectOption("team:plan-build-review");
   await expect(page.getByText(/3 agents working one after another/)).toBeVisible();

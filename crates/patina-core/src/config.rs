@@ -29,7 +29,12 @@ pub struct Config {
     pub schema_version: u32,
     pub bind: String,
     pub port: u16,
+    /// The port of the preview listener, which always binds to loopback. 0 turns the preview off.
     pub preview_port: u16,
+    /// Where browsers load the preview from, when it is not the app's host name on `preview_port`. For example
+    /// the HTTPS address `tailscale serve` gives the preview port.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview_origin: Option<String>,
     /// Host names accepted in the `Host` header (DNS rebinding defense).
     pub allowed_hosts: Vec<String>,
     /// Prune runs older than this many days. 0 keeps everything.
@@ -43,6 +48,7 @@ impl Default for Config {
             bind: "127.0.0.1".into(),
             port: 7878,
             preview_port: 7879,
+            preview_origin: None,
             allowed_hosts: vec!["localhost".into(), "127.0.0.1".into(), "[::1]".into()],
             retention_days: 0,
         }

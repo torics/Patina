@@ -353,6 +353,19 @@ pub async fn diff(repo: &Path, base: &str, branch: &str) -> Result<String, GitEr
     .await
 }
 
+/// The content of `path` at commit `rev`, or `None` if the file is not there. Read from the object database,
+/// with no filter or conversion program of the repository's config.
+pub async fn show_file(repo: &Path, rev: &str, path: &str) -> Result<Option<Vec<u8>>, GitError> {
+    let mut cmd = base_command();
+    cmd.current_dir(repo)
+        .args(["cat-file", "blob", &format!("{rev}:{path}")])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let out = cmd.output().await.map_err(GitError::Spawn)?;
+    Ok(out.status.success().then_some(out.stdout))
+}
+
 /// `(status letter, path)` for each file that differs between the base commit and the run's branch.
 pub async fn changed_files(repo: &Path, base: &str, branch: &str) -> Result<Vec<(String, String)>, GitError> {
     let out = git(

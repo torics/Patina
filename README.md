@@ -2,7 +2,7 @@
 
 A lean, self-hosted, model-agnostic agent workbench in one Rust binary. The daemon serves a browser UI, holds your API keys, calls any LLM provider on your behalf and stores every run so you can watch and review it from any device.
 
-Status: **M5 (teams)**. You can set a password, add providers and agents, and chat with streaming. An agent can work in a project: it reads, searches and edits files and runs commands in its own git worktree. Commands run in a sandbox (Landlock on Linux, or a container), each changing step is a checkpoint you can roll back to, and nothing reaches your branch until you merge. Runs can be paused, resumed and steered with messages, survive a restart of the daemon, and keep long histories inside the model's context. Teams run several agents, each on its own provider and model, from three built-in templates or your own. The file workbench and MCP arrive in later milestones. See `DECISIONS.md`.
+Status: **M6 (workbench)**. You can set a password, add providers and agents, and chat with streaming. An agent can work in a project: it reads, searches and edits files and runs commands in its own git worktree. Commands run in a sandbox (Landlock on Linux, or a container), each changing step is a checkpoint you can roll back to, and nothing reaches your branch until you merge. Runs can be paused, resumed and steered with messages, survive a restart of the daemon, and keep long histories inside the model's context. Teams run several agents, each on its own provider and model, from three built-in templates or your own. The workbench shows a project's files, an editor, each run's changes as diffs, and a live preview of the run's dev server, and it works from a phone. MCP arrives in the next milestone. See `DECISIONS.md`.
 
 ## Build and run
 
@@ -16,11 +16,13 @@ cargo build --release
 
 The first run prints the address (`http://127.0.0.1:7878`) and a one-time setup token. Open the address, enter the token, choose a password, then add a provider and an agent in Settings.
 
-Other commands: `patina doctor` checks git, the sandbox, the container runtime, ports, config files and leftover worktrees; `patina reset-password` prints a new setup token; `patina version` prints the version. `serve` accepts `--bind`, `--port`, `--config-dir`, `--data-dir` and `--log-format human|json`.
+`serve` also starts the preview listener on `127.0.0.1:7879` (see [The workbench](#the-workbench)).
+
+Other commands: `patina doctor` checks git, the sandbox, the container runtime, ports, config files and leftover worktrees; `patina reset-password` prints a new setup token; `patina version` prints the version. `serve` accepts `--bind`, `--port`, `--preview-port`, `--config-dir`, `--data-dir` and `--log-format human|json`.
 
 ## Work in a project
 
-A project is a folder that is the top level of a git repository. Add one in Settings, give an agent tools, then pick the project in the composer. The run gets a worktree under the data folder on a new branch `patina/run-<id>`, based on your current commit. Uncommitted changes in your checkout are not included.
+A project is a folder that is the top level of a git repository. Add one in Settings, give an agent tools, then pick the project with the switcher at the top. The run gets a worktree under the data folder on a new branch `patina/run-<id>`, based on your current commit. Uncommitted changes in your checkout are not included.
 
 What asks for your approval depends on the project's policy: every edit and command (`confirm_all`), commands only (`auto_edit`, the default), or nothing (`autopilot`). An edit shows its diff, a command shows its command line, and you answer Approve, Deny (with a reason the agent sees) or Approve with changed arguments. For a command you can also choose "Approve and always allow", which adds a pattern such as `cargo test *` to the project's allowlist.
 
@@ -45,7 +47,21 @@ In Settings, **Team from a template** makes one of three teams: *Solo builder*, 
 
 A helper's work is shown inside the `delegate` call that started it. Pausing a team stops every agent; resuming continues each one where it stopped, and agents that had finished are not run again.
 
-When the run stops, the Changes section shows the diff and offers: merge into your branch (your checkout must be clean), download a patch, keep the branch, or discard. Patina never pushes.
+When the run stops, the Changes tab shows the diff and offers: merge into your branch (your checkout must be clean), download a patch, keep the branch, or discard. Patina never pushes.
+
+## The workbench
+
+On a wide screen the workbench has three panes. On the left are your runs and the project's files. The center holds the prompt box, or the timeline of the open run. On the right are three tabs:
+
+- **Changes**: the files the run changed, each with an inline diff, the whole patch, checkpoints with rollback, and merge, keep or discard.
+- **Editor**: open a file from the tree, edit it and save with the button or Ctrl+S. The tree shows your checkout, or the run's copy when a run is open. A file in the run's copy can be saved only while the run is paused or stopped; the save is committed to the run's branch, so the Changes tab and a merge include it, and the agent is told before its next step.
+- **Preview**: the run's dev server, in a sandboxed frame on its own origin. Each run has its own port, given to its commands as `PORT`. Set `dev_command` on the project (for example `npm run dev -- --host 127.0.0.1 --port {port} --strictPort`) to start and stop it from this tab, or ask the agent to start one on `$PORT`. The frame reloads after every step that changes files. Hot reload over WebSocket does not pass through.
+
+In the prompt box, `@` suggests files from the project. Each file you mention goes with the prompt, read from your checkout. The header shows the open run's status, sandbox and usage against its limits, with Pause, Stop, Resume and Export (Markdown or JSON), and how many approvals wait across all runs. The theme is dark; Light is one click away.
+
+On a phone the panes become tabs (Run, Browse, Changes, Editor, Preview), with the run first, so a run can be started, steered, approved and merged by touch.
+
+To use Patina from another device, put `tailscale serve` in front of the app port and, for the preview, the preview port (for example `tailscale serve --https=8443 http://127.0.0.1:7879`), then set `preview_origin` in `config.toml` to that address.
 
 ## Commands and the sandbox
 

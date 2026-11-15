@@ -19,6 +19,8 @@ pub enum EventType {
     Checkpoint,
     Compaction,
     Rollback,
+    /// The owner saved a file in the run's worktree from the editor.
+    OwnerEdit,
     Error,
     AgentFinished,
     RunFinished,
@@ -40,6 +42,7 @@ impl EventType {
             EventType::Checkpoint => "checkpoint",
             EventType::Compaction => "compaction",
             EventType::Rollback => "rollback",
+            EventType::OwnerEdit => "owner_edit",
             EventType::Error => "error",
             EventType::AgentFinished => "agent_finished",
             EventType::RunFinished => "run_finished",

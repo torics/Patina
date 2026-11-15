@@ -2,10 +2,10 @@ import type { ComponentChildren } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import type { Budgets } from "./api/generated/Budgets";
 import { api } from "./api";
-import { Changes } from "./changes";
-import { delegated, isActive, topBlocks, type AgentBlock, type ToolItem } from "./reducer";
+import { loadProjectFiles, projectFiles } from "./files";
+import { delegated, isActive, mentions, splitPrompt, topBlocks, type AgentBlock, type ToolItem } from "./reducer";
 import { patternMatches, suggestPattern } from "./policy";
-import { agents, closeRun, continueRun, openRun, projects, report, runs, selectedRun, startRun, teams, timeline } from "./state";
+import { agents, closeRun, continueRun, currentProject, projects, report, runs, selectedRun, showTab, startRun, teams, timeline } from "./state";
 
 const DEFAULTS = { steps: "50", tokens: "2000000", cost: "", minutes: "120" };
 
@@ -25,8 +25,30 @@ const MODE_LABEL: Record<string, string> = {
 function Composer() {
   // `team:<id>` or `agent:<id>`. A team is offered first when there is one.
   const [who, setWho] = useState(teams.value[0] ? `team:${teams.value[0].id}` : agents.value[0] ? `agent:${agents.value[0].id}` : "");
-  const [project, setProject] = useState("");
+  const project = currentProject.value;
   const [prompt, setPrompt] = useState("");
+  const [caret, setCaret] = useState(0);
+  const [pick, setPick] = useState(0);
+  const box = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    loadProjectFiles(project).catch(report);
+  }, [project]);
+  const files = projectFiles.value.project === project ? projectFiles.value.files : [];
+  // The `@word` the caret is in, if any, and the files that match it.
+  const token = /(^|\s)@([^\s@]*)$/.exec(prompt.slice(0, caret));
+  const query = token ? token[2].toLowerCase() : null;
+  const matches = query === null || !project ? [] : files.filter((f) => f.toLowerCase().includes(query)).slice(0, 8);
+  const attached = project ? mentions(prompt, files) : [];
+  function complete(path: string) {
+    if (!token) return;
+    const start = caret - token[2].length;
+    const next = prompt.slice(0, start) + path + " " + prompt.slice(caret);
+    setPrompt(next);
+    const at = start + path.length + 1;
+    setCaret(at);
+    setPick(0);
+    requestAnimationFrame(() => box.current?.setSelectionRange(at, at));
+  }
   const [limits, setLimits] = useState(DEFAULTS);
   const [busy, setBusy] = useState(false);
   const team = teams.value.find((t) => `team:${t.id}` === who);
@@ -43,7 +65,7 @@ function Composer() {
     try {
       const minutes = positive(limits.minutes);
       const budgets: Budgets = { max_steps: Math.floor(steps!), max_tokens: Math.floor(tokens!), max_cost_usd: positive(limits.cost), max_wall_clock_s: minutes === null ? null : Math.round(minutes * 60) };
-      await startRun(who, prompt, project || null, budgets);
+      await startRun(who, prompt, project || null, budgets, attached);
       setPrompt("");
     } catch (err) {
       report(err);
@@ -86,36 +108,65 @@ function Composer() {
           {team.mode === "parallel" ? " Your messages reach the synthesizer." : ""}
         </p>
       )}
-      <label>
-        Project
-        <select name="project" value={project} onChange={(e) => setProject(e.currentTarget.value)}>
-          <option value="">No project (plain chat)</option>
-          {projects.value.map((p) => (
-            <option value={p.id}>
-              {p.name} ({p.path})
-            </option>
-          ))}
-        </select>
-      </label>
+      {!project && <p class="muted">No project is chosen, so this is a plain chat. Choose a project at the top to let agents work on its files.</p>}
       {picked?.sandbox_error && <p class="error">This project's sandbox is not available here, so its runs are refused: {picked.sandbox_error}. Change it in Settings.</p>}
       {picked?.effective_sandbox === "none" && <p class="muted">This project has no sandbox on this machine, so every edit and command will ask for your approval.</p>}
       {picked && picked.effective_sandbox !== null && picked.effective_sandbox !== "none" && (
         <p class="muted">Commands run in a sandbox ({picked.effective_sandbox}): they can change files only in the run's own copy of the project.</p>
       )}
       {project && chosen && chosen.tools.length === 0 && <p class="warn">This agent has no tools, so it can talk about the project but cannot read or change files. Give it tools in Settings.</p>}
-      <label>
-        Prompt
-        <textarea
-          name="prompt"
-          rows={3}
-          value={prompt}
-          onInput={(e) => setPrompt(e.currentTarget.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) submit(e);
-          }}
-          placeholder="Ask something. Ctrl+Enter sends."
-        />
-      </label>
+      <div class="mention-box">
+        <label>
+          Prompt
+          <textarea
+            ref={box}
+            name="prompt"
+            rows={4}
+            value={prompt}
+            aria-autocomplete="list"
+            aria-controls={matches.length > 0 ? "mention-list" : undefined}
+            aria-activedescendant={matches.length > 0 ? `mention-${Math.min(pick, matches.length - 1)}` : undefined}
+            onInput={(e) => (setPrompt(e.currentTarget.value), setCaret(e.currentTarget.selectionStart ?? 0), setPick(0))}
+            onClick={(e) => setCaret(e.currentTarget.selectionStart ?? 0)}
+            onKeyUp={(e) => ["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key) && setCaret(e.currentTarget.selectionStart ?? 0)}
+            onKeyDown={(e) => {
+              if (matches.length > 0) {
+                if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                  e.preventDefault();
+                  setPick((pick + (e.key === "ArrowDown" ? 1 : matches.length - 1)) % matches.length);
+                  return;
+                }
+                if (e.key === "Enter" || e.key === "Tab") {
+                  e.preventDefault();
+                  complete(matches[Math.min(pick, matches.length - 1)]);
+                  return;
+                }
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  setCaret(-1);
+                  return;
+                }
+              }
+              if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) submit(e);
+            }}
+            placeholder={project ? "Ask something. @ attaches a file. Ctrl+Enter sends." : "Ask something. Ctrl+Enter sends."}
+          />
+        </label>
+        {matches.length > 0 && (
+          <ul class="mentions" id="mention-list" role="listbox" aria-label="Files to attach">
+            {matches.map((f, i) => (
+              <li id={`mention-${i}`} role="option" aria-selected={i === Math.min(pick, matches.length - 1)} onMouseDown={(e) => (e.preventDefault(), complete(f))}>
+                {f}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      {attached.length > 0 && (
+        <p class="muted attached">
+          Attached: {attached.map((f) => <code>{f}</code>).reduce((a: any[], c, i) => (i ? [...a, ", ", c] : [c]), [])}. Their content goes with the prompt.
+        </p>
+      )}
       <details class="limits">
         <summary>Limits</summary>
         <div class="grid">
@@ -396,6 +447,73 @@ function MessageBox({ runId, live }: { runId: string; live: boolean }) {
   );
 }
 
+/** The selected run's status and controls, shown in the header: status, sandbox, usage against the limits, pause,
+ * stop, resume, export, and the way back to a new prompt. */
+export function RunBar() {
+  const t = timeline.value;
+  const id = selectedRun.value;
+  const run = runs.value.find((r) => r.id === id);
+  const live = isActive(t.status);
+  const u = t.usage;
+  const [pausing, setPausing] = useState(false);
+  useEffect(() => setPausing(false), [id, live]);
+  if (!id) return null;
+  return (
+    <div class="runbar" role="region" aria-label="Run">
+      <span class={`status ${t.status}`}>{t.status.replace("_", " ")}</span>
+      {t.sandbox && (
+        <span class={`badge ${t.sandbox === "none" ? "off" : "on"}`} title={t.sandboxDetail ?? undefined}>
+          {SANDBOX_LABEL[t.sandbox] ?? `Sandbox: ${t.sandbox}`}
+        </span>
+      )}
+      {u && (
+        <span class="usage meter" title="Usage against this run's limits">
+          Step {u.steps}
+          {run ? ` of ${run.budgets.max_steps}` : ""} · {(u.input_tokens + u.output_tokens).toLocaleString("en-US")}
+          {run ? ` of ${run.budgets.max_tokens.toLocaleString("en-US")}` : ""} tokens{u.estimated ? " (estimated)" : ""} · cost {u.cost_usd == null ? "unknown" : `$${u.cost_usd.toFixed(4)}`}
+        </span>
+      )}
+      <span class="spacer" />
+      {live && (
+        <button
+          title="Stop after the current step. The run can be resumed."
+          disabled={pausing}
+          onClick={() => {
+            setPausing(true);
+            api.pauseRun(id).catch((e) => (setPausing(false), report(e)));
+          }}
+        >
+          {pausing ? "Pausing after this step" : "Pause"}
+        </button>
+      )}
+      {live && (
+        <button class="danger" title="End the run. It cannot be resumed." onClick={() => api.cancelRun(id).catch(report)}>
+          Stop
+        </button>
+      )}
+      {!live && run?.can_resume && (
+        <button onClick={() => continueRun(id, null).catch(report)} disabled={t.status === "budget_exceeded" && !budgetRaised(run)}>
+          Resume
+        </button>
+      )}
+      <details class="export">
+        <summary>Export</summary>
+        <div class="menu">
+          <a href={api.exportUrl(id, "md")} download>
+            As Markdown
+          </a>
+          <a href={api.exportUrl(id, "json")} download>
+            As JSON
+          </a>
+        </div>
+      </details>
+      <button class="link" onClick={closeRun}>
+        New chat
+      </button>
+    </div>
+  );
+}
+
 function Timeline() {
   const t = timeline.value;
   const id = selectedRun.value!;
@@ -405,51 +523,9 @@ function Timeline() {
     end.current?.scrollIntoView({ block: "nearest" });
   }, [t.lastSeq]);
   const live = isActive(t.status);
-  const u = t.usage;
-  const [pausing, setPausing] = useState(false);
-  useEffect(() => setPausing(false), [id, live]);
+  const prompt = splitPrompt(t.prompt || run?.prompt || "");
   return (
     <section class="timeline">
-      <div class="row">
-        <span class={`status ${t.status}`}>{t.status.replace("_", " ")}</span>
-        {t.sandbox && (
-          <span class={`badge ${t.sandbox === "none" ? "off" : "on"}`} title={t.sandboxDetail ?? undefined}>
-            {SANDBOX_LABEL[t.sandbox] ?? `Sandbox: ${t.sandbox}`}
-          </span>
-        )}
-        {live && (
-          <button
-            title="Stop after the current step. The run can be resumed."
-            disabled={pausing}
-            onClick={() => {
-              setPausing(true);
-              api.pauseRun(id).catch((e) => (setPausing(false), report(e)));
-            }}
-          >
-            {pausing ? "Pausing after this step" : "Pause"}
-          </button>
-        )}
-        {live && (
-          <button class="danger" title="End the run. It cannot be resumed." onClick={() => api.cancelRun(id).catch(report)}>
-            Stop
-          </button>
-        )}
-        {!live && run?.can_resume && (
-          <button onClick={() => continueRun(id, null).catch(report)} disabled={t.status === "budget_exceeded" && !budgetRaised(run)}>
-            Resume
-          </button>
-        )}
-        <button class="link" onClick={closeRun}>
-          New chat
-        </button>
-      </div>
-      {u && (
-        <p class="usage meter">
-          Step {u.steps}
-          {run ? ` of ${run.budgets.max_steps}` : ""} · {(u.input_tokens + u.output_tokens).toLocaleString("en-US")}
-          {run ? ` of ${run.budgets.max_tokens.toLocaleString("en-US")}` : ""} tokens{u.estimated ? " (estimated)" : ""} · cost {u.cost_usd == null ? "unknown" : `$${u.cost_usd.toFixed(4)}`}
-        </p>
-      )}
       {(live || t.status === "budget_exceeded") && run && <LimitsEditor key={id} runId={id} budgets={run.budgets} />}
       {t.dirtyCheckout && <p class="warn">Your checkout had uncommitted changes when this run started. The run works from the last commit and does not include them.</p>}
       {t.team && (
@@ -457,7 +533,8 @@ function Timeline() {
           Team {t.team}, {MODE_LABEL[t.mode ?? ""] ?? t.mode}.
         </p>
       )}
-      {t.prompt && <div class="bubble user">{t.prompt}</div>}
+      {t.prompt && <div class="bubble user">{prompt.text}</div>}
+      {prompt.attachments.length > 0 && <p class="muted attached">Attached: {prompt.attachments.join(", ")}</p>}
       {t.setup.length > 0 && (
         <article class="bubble agent" aria-label="Preparing the worktree">
           <h3>
@@ -476,35 +553,22 @@ function Timeline() {
       {t.rollbacks.map((step) => (
         <p class="checkpoint">You rolled the files back to {step === 0 ? "the starting point" : `the checkpoint of step ${step}`}.</p>
       ))}
+      {t.edits.map((path) => (
+        <p class="checkpoint">You edited {path}.</p>
+      ))}
       {(t.status === "failed" || t.status === "budget_exceeded") && t.error && <p class="error">{t.status === "failed" ? `Run failed: ${t.error}` : t.error}</p>}
       {(live || run?.can_resume) && t.status !== "budget_exceeded" && <MessageBox key={id} runId={id} live={live} />}
-      {run?.branch || run?.disposition ? <Changes key={id} run={run} live={live} /> : null}
+      {run?.branch && !run.disposition && !live && (
+        <p class="next">
+          <button onClick={() => showTab("changes")}>Review the changes</button> <span class="muted">to merge, discard or roll them back.</span>
+        </p>
+      )}
       <div ref={end} />
     </section>
   );
 }
 
-export function Chat() {
-  return (
-    <div class="chat">
-      <aside>
-        <h2>Runs</h2>
-        <ul class="runs">
-          {runs.value.map((r) => (
-            <li>
-              <button class={r.id === selectedRun.value ? "run on" : "run"} onClick={() => openRun(r.id)}>
-                <span>{r.prompt.slice(0, 60)}</span>
-                <small>
-                  {r.team_id ? `team ${r.team_id}` : r.agent_id}
-                  {r.project_id ? ` in ${r.project_id}` : ""} · {r.status.replace("_", " ")}
-                </small>
-              </button>
-            </li>
-          ))}
-          {runs.value.length === 0 && <li class="muted">No runs yet.</li>}
-        </ul>
-      </aside>
-      <div class="pane">{selectedRun.value ? <Timeline /> : <Composer />}</div>
-    </div>
-  );
+/** The center pane: the composer for a new run, or the timeline of the selected one. */
+export function Center() {
+  return selectedRun.value ? <Timeline /> : <Composer />;
 }

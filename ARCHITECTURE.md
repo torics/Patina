@@ -85,6 +85,12 @@ One thread owns the SQLite connection (WAL, foreign keys on). Async code sends i
 
 Types in `patina-core::api` derive `ts-rs`. `cargo xtask ui` exports them to `ui/src/api/generated` before the Vite build, and CI fails if the committed files differ.
 
+## Workbench and preview
+
+The file routes (`/projects/:id/tree` and `/projects/:id/file`, with `?run=` for a run's worktree) use the same `Workspace` confinement as the agent's tools. A save in a run's worktree is committed with the same untrusting checkpoint code as an agent's step and logged as `owner_edit`. `@path` attachments are read by the daemon and stored in the run's prompt, so every agent and a resumed run see them.
+
+`patina-server::preview` runs a second axum listener on loopback. It holds the selected run, a port per run (picked once, kept for the daemon's lifetime), and the dev command the owner started, which runs in a sandbox built like the run's own. Requests are streamed to `127.0.0.1:<port>` with `reqwest`, without cookies or Patina headers, and responses come back without `Set-Cookie` or CORS headers. The run's sandbox setup carries the port, so commands get `PORT`, Landlock allows binding exactly that port when TCP is blocked, and the container publishes it on loopback.
+
 ## UI
 
-Preact with signals. `ui/src/reducer.ts` is a pure function from events to the timeline, and is unit tested. `ui/src/policy.ts` previews the allowlist as the daemon applies it, also unit tested. `ui/dist` is embedded with `rust-embed`.
+Preact with signals. CodeMirror 6 provides the editor and the per-file diff; it is loaded on demand and mounted in a shadow root so its styles need no `unsafe-inline`. `ui/src/reducer.ts` is a pure function from events to the timeline, and is unit tested. `ui/src/policy.ts` previews the allowlist as the daemon applies it, also unit tested. `ui/dist` is embedded with `rust-embed`.

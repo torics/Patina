@@ -132,6 +132,10 @@ impl ContainerSandbox {
         ]);
         if !self.setup.network {
             args.extend(["--network".to_string(), "none".to_string()]);
+        } else if let Some(port) = self.setup.port {
+            // The preview reaches the dev server here, on the host's loopback only. A server inside must listen
+            // on all of the container's addresses, not only on its loopback.
+            args.extend(["-p".to_string(), format!("127.0.0.1:{port}:{port}")]);
         }
         // Files the command creates in the worktree should belong to the owner, not to root.
         #[cfg(unix)]
@@ -154,6 +158,9 @@ impl ContainerSandbox {
         let mut env: Vec<(String, String)> = vec![("LANG".into(), "C.UTF-8".into()), ("TERM".into(), "dumb".into())];
         env.extend(self.setup.env.iter().map(|(k, v)| (k.clone(), v.clone())));
         env.push(("HOME".into(), HOME_IN_CONTAINER.into()));
+        if let Some(port) = self.setup.port {
+            env.push(("PORT".into(), port.to_string()));
+        }
         env.push((MARKER_VAR.into(), marker.into()));
         env
     }
@@ -288,6 +295,21 @@ mod tests {
             args.windows(2).any(|w| w == ["--cap-drop", "ALL"]) && args.windows(2).any(|w| w == ["--security-opt", "no-new-privileges"])
         );
         assert!(!sandbox(true).run_args().iter().any(|a| a == "--network"));
+    }
+
+    #[test]
+    fn the_preview_port_is_published_on_loopback_and_given_as_port() {
+        let with_port = |network| {
+            let mut s = sandbox(network);
+            s.setup.port = Some(41234);
+            s
+        };
+        let args = with_port(true).run_args();
+        assert!(args.windows(2).any(|w| w == ["-p", "127.0.0.1:41234:41234"]), "{args:?}");
+        // With the network off there is nothing to publish to.
+        assert!(!with_port(false).run_args().iter().any(|a| a == "-p"));
+        let p = with_port(true).prepare("npm run dev", "m1").unwrap();
+        assert!(p.args.windows(2).any(|w| w == ["-e", "PORT=41234"]), "{:?}", p.args);
     }
 
     #[test]

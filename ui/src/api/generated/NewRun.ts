@@ -13,4 +13,8 @@ team_id: string | null, prompt: string,
 /**
  * Run inside this project's worktree with the agent's tools. Without it, the run is a plain chat.
  */
-project_id: string | null, budgets: Budgets | null, };
+project_id: string | null, budgets: Budgets | null, 
+/**
+ * Files of the project, as relative paths, whose content is added to the prompt (`@path` mentions).
+ */
+attachments: Array<string>, };

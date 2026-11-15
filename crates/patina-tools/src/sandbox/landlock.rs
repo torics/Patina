@@ -6,8 +6,8 @@
 //! against a kernel exploit.
 use super::{Setup, base_env, overlaps, shell};
 use landlock::{
-    ABI, Access, AccessFs, AccessNet, CompatLevel, Compatible, Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetError, RulesetStatus,
-    Scope, path_beneath_rules,
+    ABI, Access, AccessFs, AccessNet, CompatLevel, Compatible, NetPort, Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetError,
+    RulesetStatus, Scope, path_beneath_rules,
 };
 use patina_core::sandbox::{Prepared, Sandbox, SandboxError, SandboxLevel};
 use std::path::{Path, PathBuf};
@@ -55,6 +55,8 @@ pub struct Policy {
     pub dev: Vec<PathBuf>,
     /// Deny TCP connect and bind. Needs ABI 4; fails closed without it.
     pub block_tcp: bool,
+    /// With `block_tcp`: the one port commands may still listen on, the run's preview port.
+    pub bind_port: Option<u16>,
 }
 
 /// Restrict the current process, for good. On success nothing outside the policy can be opened any more.
@@ -77,7 +79,13 @@ pub fn restrict(policy: &Policy) -> Result<(), String> {
             .create()?
             .add_rules(path_beneath_rules(&policy.rw, AccessFs::from_all(FS_ABI)))?
             .add_rules(path_beneath_rules(&policy.ro, AccessFs::from_read(FS_ABI)))?
-            .add_rules(path_beneath_rules(&policy.dev, AccessFs::from_file(FS_ABI)))?;
+            .add_rules(path_beneath_rules(&policy.dev, AccessFs::from_file(FS_ABI)))?
+            .add_rules(
+                policy
+                    .bind_port
+                    .filter(|_| policy.block_tcp)
+                    .map(|port| Ok::<_, RulesetError>(NetPort::new(port, AccessNet::BindTcp))),
+            )?;
         let status = created.restrict_self()?;
         if !status.no_new_privs {
             return Ok(RulesetStatus::NotEnforced);
@@ -167,6 +175,7 @@ impl LandlockSandbox {
             ro,
             dev: DEVICES.iter().map(PathBuf::from).collect(),
             block_tcp: !setup.network,
+            bind_port: setup.port,
         };
         Ok(LandlockSandbox { setup, policy, abi })
     }
@@ -187,6 +196,10 @@ pub fn helper_args(policy: &Policy, program: &Path, args: &[String]) -> Vec<Stri
     }
     if policy.block_tcp {
         out.push("--block-tcp".into());
+        if let Some(port) = policy.bind_port {
+            out.push("--bind-port".into());
+            out.push(port.to_string());
+        }
     }
     out.push("--".into());
     out.push(program.to_string_lossy().into_owned());

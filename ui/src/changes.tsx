@@ -1,5 +1,5 @@
 // What a run changed in its worktree: files, diff, checkpoints, and what to do with the work.
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import type { CheckpointView } from "./api/generated/CheckpointView";
 import type { DiffView } from "./api/generated/DiffView";
 import type { RunView } from "./api/generated/RunView";
@@ -14,12 +14,44 @@ const DISPOSITION: Record<string, string> = {
 
 const STATUS: Record<string, string> = { A: "added", M: "changed", D: "deleted", R: "renamed" };
 
+/** One file before and after the run, in the editor's diff view. */
+function FileDiff({ runId, path, version }: { runId: string; path: string; version: number }) {
+  const host = useRef<HTMLDivElement>(null);
+  const [note, setNote] = useState<string | null>(null);
+  useEffect(() => {
+    let current = true;
+    let destroy: (() => void) | null = null;
+    setNote(null);
+    api
+      .fileDiff(runId, path)
+      .then(async (d) => {
+        if (!current || !host.current) return;
+        if (d.before === null && d.after === null) return setNote("This file is not text, or too large to show.");
+        const { mountDiff } = await import("./cm");
+        if (!current || !host.current) return;
+        destroy = (await mountDiff(host.current, path, d.before ?? "", d.after ?? "")).destroy;
+      })
+      .catch((e) => current && setNote(e instanceof Error ? e.message : String(e)));
+    return () => {
+      current = false;
+      destroy?.();
+    };
+  }, [runId, path, version]);
+  return (
+    <div class="file-diff" aria-label={`Diff of ${path}`}>
+      {note && <p class="muted">{note}</p>}
+      <div class="cm-host" ref={host} />
+    </div>
+  );
+}
+
 export function Changes({ run, live }: { run: RunView; live: boolean }) {
   const [diff, setDiff] = useState<DiffView | null>(null);
   const [checkpoints, setCheckpoints] = useState<CheckpointView[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [shown, setShown] = useState<string | null>(null);
   const gone = run.disposition === "merged" || run.disposition === "discarded";
   const changes = timeline.value.changes;
 
@@ -93,11 +125,15 @@ export function Changes({ run, live }: { run: RunView; live: boolean }) {
               <ul class="files">
                 {diff.files.map((f) => (
                   <li>
-                    <span class={`file ${f.status}`}>{STATUS[f.status] ?? f.status}</span> {f.path}
+                    <span class={`file ${f.status}`}>{STATUS[f.status] ?? f.status}</span>{" "}
+                    <button class="link path" aria-expanded={shown === f.path} aria-label={`Show the diff of ${f.path}`} onClick={() => setShown(shown === f.path ? null : f.path)}>
+                      {f.path}
+                    </button>
+                    {shown === f.path && <FileDiff runId={run.id} path={f.path} version={changes} />}
                   </li>
                 ))}
               </ul>
-              <details open>
+              <details>
                 <summary>Diff of all changes</summary>
                 <pre class="diff">{diff.diff}</pre>
               </details>

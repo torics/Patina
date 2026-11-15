@@ -8,7 +8,8 @@ Files live in the config folder (`~/.config/patina/` on Linux, or `--config-dir`
 | --- | --- | --- |
 | `bind` | `"127.0.0.1"` | Listen address |
 | `port` | `7878` | App port |
-| `preview_port` | `7879` | Preview proxy port (used from M6) |
+| `preview_port` | `7879` | Preview listener port, always on `127.0.0.1`. `0` turns the preview off. `patina serve --preview-port` overrides it |
+| `preview_origin` | none | Where browsers load the preview from when a tunnel serves it elsewhere, for example `"https://box.tailnet.ts.net:8443"`. By default the app's host name on `preview_port` |
 | `allowed_hosts` | `["localhost", "127.0.0.1", "[::1]"]` | Accepted `Host` names |
 | `retention_days` | `0` | Remove the event log, agent context and saved outputs of runs that ended more than this many days ago, at start and every six hours. The run, its branch and its checkpoints stay; a pruned run cannot be resumed. Paused and waiting runs are never pruned. 0 keeps everything |
 
@@ -98,12 +99,13 @@ Only what differs from the defaults is written to the file. Everything below is 
 | `worktree_copy` | `[]` | Gitignored files and folders to copy from the project into each new worktree, for example `node_modules` or `config/local.toml`. Paths are relative to the project. Only ignored entries are accepted, so a checkpoint never commits them |
 | `worktree_copy_secrets` | `[]` | The entries of `worktree_copy` that hold credentials. An entry that looks like a credentials file (`.env`, `*.pem`, `id_rsa`, `.npmrc` and similar) is refused unless it is also listed here |
 | `worktree_setup` | none | A command to run in each new worktree before the agent starts, inside the sandbox, with a ten-minute limit. If it fails, the run fails |
+| `dev_command` | none | The dev server for Preview, started from the Preview tab in the run's worktree, inside the sandbox. `{port}` becomes the run's port, which is also in `PORT`. Many dev servers need it named: Vite takes `--port {port} --strictPort`. Under the container backend the server must listen on `0.0.0.0` |
 
 Without a sandbox, every edit and command asks whatever `policy` says. The file is read on every use, so a hand edit applies to the next run. "Approve and always allow" in the UI appends to `allow_commands`.
 
 ### What a command gets
 
-A command runs through `/bin/sh -c` in the worktree with `PATH`, `LANG`, `TERM=dumb`, a private `HOME` and `TMPDIR` (under the data folder, per run), and the project's `env`. Nothing else of the daemon's environment is passed on.
+A command runs through `/bin/sh -c` in the worktree with `PATH`, `LANG`, `TERM=dumb`, a private `HOME` and `TMPDIR` (under the data folder, per run), `PORT` (the run's preview port), and the project's `env`. Nothing else of the daemon's environment is passed on.
 
 Under Landlock, a command can read the system folders, every folder on its `PATH`, and `sandbox_read`. A toolchain that lives in your home folder must be opened explicitly. Recipes:
 

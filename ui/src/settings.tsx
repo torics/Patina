@@ -298,14 +298,14 @@ function AgentRow({ a }: { a: AgentConfig }) {
   );
 }
 
-const POLICIES: { value: PolicyMode; label: string }[] = [
+export const POLICIES: { value: PolicyMode; label: string }[] = [
   { value: "confirm_all", label: "Ask before every edit" },
   { value: "auto_edit", label: "Apply edits without asking" },
   { value: "autopilot", label: "Never ask" },
 ];
 
 /** The policies to offer. "Never ask" is offered only where commands are contained; a project that already has it keeps showing it. */
-function policyChoices(contained: boolean, current?: PolicyMode) {
+export function policyChoices(contained: boolean, current?: PolicyMode) {
   return POLICIES.filter((p) => p.value !== "autopilot" || contained || current === "autopilot");
 }
 
@@ -414,6 +414,7 @@ function ProjectSettings({ p, saved, setSaved }: { p: ProjectView; saved: boolea
   const [copy, setCopy] = useState(p.worktree_copy.join("\n"));
   const [secrets, setSecrets] = useState<string[]>(p.worktree_copy_secrets);
   const [setup, setSetup] = useState(p.worktree_setup ?? "");
+  const [dev, setDev] = useState(p.dev_command ?? "");
   const [error, setError] = useState<string | null>(null);
   const risky = lines(copy).filter(looksLikeCredentials);
   const input = (set: (v: string) => void) => (e: { currentTarget: { value: string } }) => (set(e.currentTarget.value), setSaved(false));
@@ -435,6 +436,7 @@ function ProjectSettings({ p, saved, setSaved }: { p: ProjectView; saved: boolea
         worktree_copy: copied,
         worktree_copy_secrets: secrets.filter((s) => copied.includes(s)),
         worktree_setup: setup.trim() || null,
+        dev_command: dev.trim() || null,
       });
       await refresh();
       setSaved(true);
@@ -502,6 +504,10 @@ function ProjectSettings({ p, saved, setSaved }: { p: ProjectView; saved: boolea
         <label>
           Command to run in each new copy before the agent starts (for example npm ci). It runs inside the sandbox.
           <input name="worktree_setup" value={setup} onInput={input(setSetup)} />
+        </label>
+        <label>
+          Dev server command for Preview, run in a run's copy inside the sandbox. <code>{"{port}"}</code> becomes the run's port, which is also in <code>PORT</code>.
+          <input name="dev_command" value={dev} onInput={input(setDev)} placeholder="npm run dev -- --host 127.0.0.1 --port {port} --strictPort" />
         </label>
         {error && <p class="error">{error}</p>}
         <div class="row">

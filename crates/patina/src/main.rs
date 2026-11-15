@@ -29,6 +29,10 @@ enum Command {
         bind: Option<IpAddr>,
         #[arg(long)]
         port: Option<u16>,
+        /// The preview listener's port, on loopback. 0 picks a free one. Set preview_port = 0 in config.toml to
+        /// turn the preview off
+        #[arg(long)]
+        preview_port: Option<u16>,
         #[arg(long)]
         config_dir: Option<PathBuf>,
         #[arg(long)]
@@ -76,6 +80,8 @@ enum Command {
         dev: Vec<PathBuf>,
         #[arg(long)]
         block_tcp: bool,
+        #[arg(long)]
+        bind_port: Option<u16>,
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
@@ -118,10 +124,17 @@ fn main() -> Result<ExitCode> {
         ro,
         dev,
         block_tcp,
+        bind_port,
         command,
     } = command
     {
-        let policy = patina_tools::sandbox::landlock::Policy { rw, ro, dev, block_tcp };
+        let policy = patina_tools::sandbox::landlock::Policy {
+            rw,
+            ro,
+            dev,
+            block_tcp,
+            bind_port,
+        };
         let why = patina_tools::sandbox::landlock::exec_restricted(&policy, std::path::Path::new(&command[0]), &command[1..]);
         eprintln!("patina: {why}");
         // 126: the command was found but could not be run.
@@ -200,12 +213,13 @@ async fn run_command(command: Command) -> Result<ExitCode> {
         Command::Serve {
             bind,
             port,
+            preview_port,
             config_dir,
             data_dir,
             log_format,
         } => {
             init_logging(log_format);
-            serve(bind, port, config_dir, data_dir).await?;
+            serve(bind, port, preview_port, config_dir, data_dir).await?;
         }
     }
     Ok(ExitCode::SUCCESS)
@@ -218,7 +232,13 @@ fn open_paths(config_dir: Option<PathBuf>, data_dir: Option<PathBuf>) -> Result<
     Ok(paths)
 }
 
-async fn serve(bind: Option<IpAddr>, port: Option<u16>, config_dir: Option<PathBuf>, data_dir: Option<PathBuf>) -> Result<()> {
+async fn serve(
+    bind: Option<IpAddr>,
+    port: Option<u16>,
+    preview_port: Option<u16>,
+    config_dir: Option<PathBuf>,
+    data_dir: Option<PathBuf>,
+) -> Result<()> {
     let paths = open_paths(config_dir, data_dir)?;
     let cfg = Config::load_or_create(&paths.config_file())?;
     let db = patina_store::Db::open(&paths.database_file())?;
@@ -250,7 +270,34 @@ async fn serve(bind: Option<IpAddr>, port: Option<u16>, config_dir: Option<PathB
     if let Some(t) = setup_token {
         println!("First run: open that address and enter this one-time setup token to set your password:\n  {t}");
     }
-    patina_server::serve(listener, state, shutdown_signal()).await?;
+    // The preview gets its own origin on a second port, always on loopback. Remote access goes through a tunnel
+    // such as `tailscale serve`, as for the app. A port that is taken turns the preview off, not the daemon.
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let configured = state.config.preview_port;
+    let preview = match preview_port.or((configured != 0).then_some(configured)) {
+        Some(p) => match patina_server::bind(SocketAddr::new(IpAddr::from([127, 0, 0, 1]), p)).await {
+            Ok(l) => {
+                println!("Preview is served at http://{}", l.local_addr()?);
+                let mut rx = stop_rx.clone();
+                Some(tokio::spawn(patina_server::serve_preview(l, state.clone(), async move {
+                    let _ = rx.wait_for(|stop| *stop).await;
+                })))
+            }
+            Err(e) => {
+                tracing::warn!(port = p, error = %e, "the preview port is not free; the preview is off");
+                None
+            }
+        },
+        None => None,
+    };
+    patina_server::serve(listener, state, async move {
+        shutdown_signal().await;
+        let _ = stop_tx.send(true);
+    })
+    .await?;
+    if let Some(p) = preview {
+        let _ = p.await;
+    }
     Ok(())
 }
 

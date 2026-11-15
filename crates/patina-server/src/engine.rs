@@ -343,8 +343,9 @@ fn roster_of(agents: Vec<Resolved>, workspace: Option<(&Arc<Workspace>, &Arc<Com
 }
 
 /// The sandbox for a run of `project`, as the host can give it now. A backend that was asked for and is missing
-/// is an error; it is never replaced by a weaker one.
-async fn sandbox_for(st: &AppState, project: &ProjectConfig, run_id: &str) -> ApiResult<Arc<dyn Sandbox>> {
+/// is an error; it is never replaced by a weaker one. The preview's dev command gets a sandbox of its own, with
+/// the same limits, so that it outlives the run's agents without sharing their container.
+pub(crate) async fn sandbox_for(st: &AppState, project: &ProjectConfig, run_id: &str, preview: bool) -> ApiResult<Arc<dyn Sandbox>> {
     let caps = st.caps().await;
     let level = caps
         .resolve(project.sandbox, project.container_image.is_some())
@@ -364,8 +365,13 @@ async fn sandbox_for(st: &AppState, project: &ProjectConfig, run_id: &str) -> Ap
             extra_read: project.sandbox_read.iter().map(PathBuf::from).collect(),
             extra_write: project.sandbox_write.iter().map(PathBuf::from).collect(),
             container_image: project.container_image.clone(),
-            container_name: container::container_name(run_id),
+            container_name: if preview {
+                format!("{}-preview", container::container_name(run_id))
+            } else {
+                container::container_name(run_id)
+            },
             protected: vec![own(&st.paths.data_dir), own(&st.paths.config_dir)],
+            port: st.preview.port_for(run_id),
         },
     )
     .map_err(sandbox_unavailable)
@@ -432,6 +438,49 @@ fn new_handle(budget: BudgetTracker, allow_commands: Allowlist) -> Arc<RunHandle
     })
 }
 
+/// The most an `@path` attachment, and all of a prompt's attachments together, may add to it.
+const MAX_ATTACHMENT: usize = 256 * 1024;
+const MAX_ATTACHMENTS: usize = 512 * 1024;
+
+/// Where an attached file starts in a prompt. The UI shows the prompt up to the first one.
+pub const ATTACHMENT_OPEN: &str = "\n\n<attached_file path=";
+
+/// The prompt with the content of each `@path` the owner attached, read from the project's checkout as the owner
+/// sees it. Stored this way, so every agent of the run and a resumed run see the same text.
+async fn with_attachments(prompt: &str, paths: &[String], project: Option<&ProjectConfig>) -> ApiResult<String> {
+    if paths.is_empty() {
+        return Ok(prompt.to_string());
+    }
+    let project = project.ok_or_else(|| ApiError::bad_request("attaching files needs a project"))?;
+    let ws = Workspace::new(Path::new(&project.path)).map_err(ApiError::internal)?;
+    let mut out = prompt.trim_end().to_string();
+    let mut total = 0;
+    let mut seen = std::collections::HashSet::new();
+    for rel in paths {
+        if !seen.insert(rel.as_str()) {
+            continue;
+        }
+        let content =
+            crate::files::read_text(&ws, rel).map_err(|e| ApiError::bad_request(format!("cannot attach {rel:?}: {}", e.message)))?;
+        if content.len() > MAX_ATTACHMENT {
+            return Err(ApiError::bad_request(format!(
+                "{rel:?} is larger than {} KB; ask the agent to read it instead",
+                MAX_ATTACHMENT / 1024
+            )));
+        }
+        total += content.len();
+        if total > MAX_ATTACHMENTS {
+            return Err(ApiError::bad_request(format!(
+                "the attached files add up to more than {} KB; attach fewer",
+                MAX_ATTACHMENTS / 1024
+            )));
+        }
+        let quoted = serde_json::to_string(rel).map_err(ApiError::internal)?;
+        out.push_str(&format!("{ATTACHMENT_OPEN}{quoted}>\n{}\n</attached_file>", content.trim_end()));
+    }
+    Ok(out)
+}
+
 /// Create the run, its worktree and its budgets, then start its agents as a task.
 pub async fn start_run(st: &Arc<AppState>, input: NewRun) -> ApiResult<(store::RunRow, Arc<RunHandle>)> {
     if input.prompt.trim().is_empty() {
@@ -450,7 +499,8 @@ pub async fn start_run(st: &Arc<AppState>, input: NewRun) -> ApiResult<(store::R
     let run_id = new_id();
     let project_id = project.as_ref().map(|p| p.id.as_str()).unwrap_or("");
     let budgets_json = serde_json::to_value(&budgets).map_err(ApiError::internal)?;
-    let mut plan = empty_plan(who.clone(), team, input.prompt.clone(), false);
+    let prompt = with_attachments(&input.prompt, &input.attachments, project.as_ref()).await?;
+    let mut plan = empty_plan(who.clone(), team, prompt.clone(), false);
     if let Some(project) = &project {
         let repo = PathBuf::from(&project.path);
         if !git::is_repo_root(&repo).await {
@@ -464,13 +514,13 @@ pub async fn start_run(st: &Arc<AppState>, input: NewRun) -> ApiResult<(store::R
         let branch = format!("patina/run-{}", &container::container_name(&run_id)["patina-".len()..]);
         let worktree = st.worktree_dir(&run_id);
         // The sandbox is settled before anything is created.
-        let sandbox = sandbox_for(st, project, &run_id).await?;
+        let sandbox = sandbox_for(st, project, &run_id, false).await?;
         let private = st.sandbox_dir(&run_id);
         let base = git::create_worktree(&repo, &worktree, &branch).await.map_err(|e| {
             let _ = std::fs::remove_dir_all(&private);
             ApiError::bad_request(e.to_string())
         })?;
-        store::create_run(&st.db, &run_id, project_id, &who, &input.prompt, &budgets_json).await?;
+        store::create_run(&st.db, &run_id, project_id, &who, &prompt, &budgets_json).await?;
         store::set_worktree(&st.db, &run_id, Some(&worktree.to_string_lossy()), Some(&branch), Some(&base)).await?;
         equip(&mut plan, agents, project, &worktree, sandbox, &run_id)?;
         plan.prepare = Some(Prepare {
@@ -479,7 +529,7 @@ pub async fn start_run(st: &Arc<AppState>, input: NewRun) -> ApiResult<(store::R
             setup: project.worktree_setup.clone(),
         });
     } else {
-        store::create_run(&st.db, &run_id, "", &who, &input.prompt, &budgets_json).await?;
+        store::create_run(&st.db, &run_id, "", &who, &prompt, &budgets_json).await?;
         plan.roster = roster_of(agents, None);
     }
 
@@ -689,7 +739,7 @@ async fn plan_resume(st: &Arc<AppState>, row: &store::RunRow) -> ApiResult<Plan>
             .project(&row.project_id)
             .map_err(|_| ApiError::conflict("no_project", "the run's project no longer exists, so it cannot be resumed"))?;
         let worktree = PathBuf::from(row.worktree_path.as_deref().unwrap_or_default());
-        let sandbox = sandbox_for(st, &project, &row.id).await?;
+        let sandbox = sandbox_for(st, &project, &row.id, false).await?;
         equip(&mut plan, agents, &project, &worktree, sandbox, &row.id)?;
         if !started {
             // The run stopped before any agent started, for example in a failed setup command: prepare again.
@@ -908,6 +958,7 @@ pub async fn recover(st: &AppState) -> ApiResult<Vec<String>> {
 /// Stop every run of this process for a shutdown. Each records itself as interrupted, or as still waiting for
 /// an approval, so it can be resumed. Waits up to `limit` for them to finish recording.
 pub async fn shutdown(st: &AppState, limit: Duration) {
+    st.preview.stop_dev().await;
     let handles: Vec<Arc<RunHandle>> = st.runs.lock().unwrap().values().cloned().collect();
     for h in &handles {
         h.signals.shutdown.store(true, Ordering::SeqCst);

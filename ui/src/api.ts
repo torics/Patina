@@ -1,6 +1,11 @@
 // The only place that talks to the daemon. The CSRF token lives in memory, never in storage.
 import type { AgentConfig } from "./api/generated/AgentConfig";
 import type { ApprovalAnswer } from "./api/generated/ApprovalAnswer";
+import type { ApprovalView } from "./api/generated/ApprovalView";
+import type { FileContent } from "./api/generated/FileContent";
+import type { FileDiffView } from "./api/generated/FileDiffView";
+import type { FileTree } from "./api/generated/FileTree";
+import type { PreviewView } from "./api/generated/PreviewView";
 import type { Budgets } from "./api/generated/Budgets";
 import type { CheckpointView } from "./api/generated/CheckpointView";
 import type { DiffView } from "./api/generated/DiffView";
@@ -109,4 +114,21 @@ export const api = {
   updateProject: (id: string, patch: ProjectPatch) => call<ProjectView>("PATCH", `/projects/${encodeURIComponent(id)}`, patch),
   deleteProject: (id: string) => call("DELETE", `/projects/${encodeURIComponent(id)}`),
   eventsUrl: (id: string, after: number) => `${BASE}/runs/${encodeURIComponent(id)}/events?after=${after}`,
+  exportUrl: (id: string, format: "md" | "json") => `${BASE}/runs/${encodeURIComponent(id)}/export?format=${format}`,
+  pendingApprovals: () => call<ApprovalView[]>("GET", "/approvals?status=pending"),
+  /** The files of a project's checkout, or of a run's worktree when `run` is given. */
+  tree: (project: string, run: string | null) => call<FileTree>("GET", `/projects/${encodeURIComponent(project)}/tree${run ? `?run=${encodeURIComponent(run)}` : ""}`),
+  readFile: (project: string, run: string | null, path: string) => call<FileContent>("GET", `/projects/${encodeURIComponent(project)}/file?${fileQuery(run, path)}`),
+  writeFile: (project: string, run: string | null, path: string, content: string) => call<FileContent>("PUT", `/projects/${encodeURIComponent(project)}/file?${fileQuery(run, path)}`, { content }),
+  fileDiff: (run: string, path: string) => call<FileDiffView>("GET", `/runs/${encodeURIComponent(run)}/diff/file?path=${encodeURIComponent(path)}`),
+  preview: () => call<PreviewView>("GET", "/preview"),
+  selectPreview: (runId: string | null) => call<PreviewView>("PUT", "/preview", { run_id: runId }),
+  startPreview: () => call<PreviewView>("POST", "/preview/start", {}),
+  stopPreview: () => call<PreviewView>("POST", "/preview/stop", {}),
 };
+
+function fileQuery(run: string | null, path: string): string {
+  const q = new URLSearchParams({ path });
+  if (run) q.set("run", run);
+  return q.toString();
+}

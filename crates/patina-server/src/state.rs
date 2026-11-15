@@ -66,6 +66,8 @@ pub struct AppState {
     pub helper: PathBuf,
     /// This process, as recorded on the runs it drives.
     pub identity: String,
+    /// The preview listener's state: the selected run, each run's port, and the dev command Patina started.
+    pub preview: crate::preview::Preview,
     caps: tokio::sync::OnceCell<Caps>,
     providers: Mutex<Option<(SystemTime, ProvidersFile)>>,
     registry: Mutex<HashMap<String, CachedProvider>>,
@@ -83,6 +85,7 @@ impl AppState {
             runs: Mutex::default(),
             helper: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("patina")),
             identity: patina_tools::process::identity(),
+            preview: Default::default(),
             caps: tokio::sync::OnceCell::new(),
             providers: Mutex::default(),
             registry: Mutex::default(),

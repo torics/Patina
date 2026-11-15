@@ -47,4 +47,9 @@ worktree_copy_secrets: Array<string>,
 /**
  * A command to run in each new worktree before the agent starts, inside the sandbox.
  */
-worktree_setup: string | null, };
+worktree_setup: string | null, 
+/**
+ * The command that starts the project's dev server for Preview, run in a run's worktree inside the sandbox.
+ * `{port}` is replaced by the run's preview port, which is also in `PORT`.
+ */
+dev_command: string | null, };

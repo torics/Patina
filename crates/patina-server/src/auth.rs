@@ -90,14 +90,35 @@ pub async fn host_guard(State(st): State<Arc<AppState>>, req: Request, next: Nex
     next.run(req).await
 }
 
-/// Security headers on every response. The CSP has no `frame-src` yet: the preview origin arrives in M6.
-pub async fn security_headers(req: Request, next: Next) -> Response {
+/// The origins the preview may be framed from: the configured one, or the app's host name on the preview port.
+fn preview_sources(st: &AppState, host: Option<&str>) -> String {
+    let Some(addr) = st.preview.addr.get() else {
+        return String::new();
+    };
+    if let Some(origin) = &st.config.preview_origin {
+        return format!("; frame-src {origin}");
+    }
+    let Some(host) = host.map(host_name).filter(|h| !h.is_empty()) else {
+        return String::new();
+    };
+    let port = addr.port();
+    format!("; frame-src http://{host}:{port} https://{host}:{port}")
+}
+
+/// Security headers on every response. Frames may come only from the preview origin.
+pub async fn security_headers(State(st): State<Arc<AppState>>, req: Request, next: Next) -> Response {
     let is_api = req.uri().path().starts_with("/api/");
+    let host = req.headers().get(header::HOST).and_then(|v| v.to_str().ok()).map(str::to_string);
     let mut r = next.run(req).await;
+    let csp = format!(
+        "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'{}",
+        preview_sources(&st, host.as_deref())
+    );
     let h = r.headers_mut();
     h.insert(
         header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static("default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"),
+        HeaderValue::from_str(&csp)
+            .unwrap_or_else(|_| HeaderValue::from_static("default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")),
     );
     h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));

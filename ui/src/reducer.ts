@@ -96,10 +96,12 @@ export interface Timeline {
   rollbacks: number[];
   /** Goes up whenever the run's files may have changed, so views of the changes know to reload. */
   changes: number;
+  /** Files the owner saved in the run's worktree from the editor, in order. */
+  edits: string[];
 }
 
 export function emptyTimeline(): Timeline {
-  return { lastSeq: 0, prompt: "", team: null, mode: null, status: "queued", error: null, hasWorkspace: false, dirtyCheckout: false, sandbox: null, sandboxDetail: null, setup: [], blocks: [], usage: null, rollbacks: [], changes: 0 };
+  return { lastSeq: 0, prompt: "", team: null, mode: null, status: "queued", error: null, hasWorkspace: false, dirtyCheckout: false, sandbox: null, sandboxDetail: null, setup: [], blocks: [], usage: null, rollbacks: [], changes: 0, edits: [] };
 }
 
 function lastBlock(t: Timeline, agentId: string | null): AgentBlock | undefined {
@@ -254,6 +256,10 @@ export function applyEvent(t: Timeline, ev: Event): Timeline {
       next.rollbacks = [...next.rollbacks, Number(p.step)];
       next.changes += 1;
       break;
+    case "owner_edit":
+      next.edits = [...next.edits, String(p.path ?? "")];
+      next.changes += 1;
+      break;
     case "error":
       // Reaching a budget ends the run; the run's own status and error say so.
       if (block && !p.budget) {
@@ -293,6 +299,34 @@ export function applyEvent(t: Timeline, ev: Event): Timeline {
       break;
   }
   return next;
+}
+
+const ATTACHED = "\n\n<attached_file path=";
+
+/** The prompt as the owner typed it, and the files attached to it with `@path`, which follow it in the text. */
+export function splitPrompt(prompt: string): { text: string; attachments: string[] } {
+  const at = prompt.indexOf(ATTACHED);
+  if (at < 0) return { text: prompt, attachments: [] };
+  const attachments: string[] = [];
+  for (const m of prompt.slice(at).matchAll(/\n\n<attached_file path=("(?:[^"\\]|\\.)*")>\n/g)) {
+    try {
+      attachments.push(JSON.parse(m[1]));
+    } catch {
+      // A path that is not valid JSON was not written by Patina; leave it out.
+    }
+  }
+  return { text: prompt.slice(0, at), attachments };
+}
+
+/** The `@path` mentions in a prompt that name files in `files`, each once, in order. */
+export function mentions(prompt: string, files: string[]): string[] {
+  const known = new Set(files);
+  const out: string[] = [];
+  for (const m of prompt.matchAll(/(^|\s)@(\S+)/g)) {
+    const path = m[2].replace(/[.,;:!?)]+$/, "");
+    if (known.has(path) && !out.includes(path)) out.push(path);
+  }
+  return out;
 }
 
 /** The blocks to show at the top of the timeline: agents the run started itself, not sub-agents. */

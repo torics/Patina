@@ -35,6 +35,8 @@ pub struct Setup {
     pub container_name: String,
     /// Patina's own config and data folders. No command gets access to them.
     pub protected: Vec<PathBuf>,
+    /// The run's preview port. Commands get it as `PORT`, and may listen on it even when TCP is blocked.
+    pub port: Option<u16>,
 }
 
 /// What the host was seen to support.
@@ -144,6 +146,9 @@ pub fn base_env(setup: &Setup, home: &Path, marker: &str) -> Vec<(String, String
     }
     env.insert("HOME".to_string(), home.to_string_lossy().into_owned());
     env.insert("TMPDIR".to_string(), setup.tmp.to_string_lossy().into_owned());
+    if let Some(port) = setup.port {
+        env.insert("PORT".to_string(), port.to_string());
+    }
     env.insert(MARKER_VAR.to_string(), marker.to_string());
     env.into_iter().collect()
 }
@@ -275,11 +280,13 @@ mod tests {
         let setup = Setup {
             tmp: "/run/tmp".into(),
             env: [("CI".to_string(), "1".to_string()), ("TERM".to_string(), "xterm".to_string())].into(),
+            port: Some(41234),
             ..Default::default()
         };
         let env: BTreeMap<_, _> = base_env(&setup, Path::new("/run/home"), "m1").into_iter().collect();
         let names: Vec<&str> = env.keys().map(String::as_str).collect();
-        assert_eq!(names, ["CI", "HOME", "LANG", "PATH", "PATINA_CMD", "TERM", "TMPDIR"]);
+        assert_eq!(names, ["CI", "HOME", "LANG", "PATH", "PATINA_CMD", "PORT", "TERM", "TMPDIR"]);
+        assert_eq!(env["PORT"], "41234");
         assert_eq!(
             (
                 env["HOME"].as_str(),

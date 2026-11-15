@@ -320,7 +320,10 @@ pub async fn report(paths: &Paths) -> Report {
     sandbox_checks(&mut c, &caps);
     let (cfg, projects) = config_checks(&mut c, paths);
     port_check(&mut c, "port", &cfg.bind, cfg.port).await;
-    port_check(&mut c, "preview port", &cfg.bind, cfg.preview_port).await;
+    // The preview always listens on loopback; 0 turns it off.
+    if cfg.preview_port != 0 {
+        port_check(&mut c, "preview port", "127.0.0.1", cfg.preview_port).await;
+    }
     project_checks(&mut c, &projects, &caps).await;
     worktree_checks(&mut c, paths).await;
     Report {

@@ -46,6 +46,10 @@ pub struct ProjectConfig {
     /// A command to run in each new worktree before the agent starts, inside the sandbox.
     #[serde(default)]
     pub worktree_setup: Option<String>,
+    /// The command that starts the project's dev server for Preview, run in a run's worktree inside the sandbox.
+    /// `{port}` is replaced by the run's preview port, which is also in `PORT`.
+    #[serde(default)]
+    pub dev_command: Option<String>,
 }
 
 impl Default for ProjectConfig {
@@ -66,6 +70,7 @@ impl Default for ProjectConfig {
             worktree_copy: vec![],
             worktree_copy_secrets: vec![],
             worktree_setup: None,
+            dev_command: None,
         }
     }
 }

@@ -13,4 +13,13 @@ tools: Array<string>,
 /**
  * Logs of runs that ended more than this many days ago are removed. 0 keeps them. Set in `config.toml`.
  */
-retention_days: number, };
+retention_days: number, 
+/**
+ * The port of the preview listener on the daemon's host, or null when it is off.
+ */
+preview_port: number | null, 
+/**
+ * Where the browser loads the preview from, when the owner configured it. Otherwise it is the app's own
+ * host name on `preview_port`.
+ */
+preview_origin: string | null, };

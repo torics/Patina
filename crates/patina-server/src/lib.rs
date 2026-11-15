@@ -4,6 +4,8 @@ pub mod auth;
 pub mod changes;
 pub mod engine;
 pub mod error;
+pub mod files;
+pub mod preview;
 pub mod projects;
 pub mod runs;
 pub mod state;
@@ -61,8 +63,15 @@ pub fn router(st: Arc<AppState>) -> Router {
         .route("/runs/{id}/rollback", post(changes::rollback))
         .route("/runs/{id}/merge", post(changes::merge))
         .route("/runs/{id}/discard", post(changes::discard))
+        .route("/runs/{id}/diff/file", get(files::file_diff))
+        .route("/runs/{id}/export", get(files::export))
         .route("/projects", get(projects::list).post(projects::create))
         .route("/projects/{id}", axum::routing::patch(projects::update).delete(projects::delete))
+        .route("/projects/{id}/tree", get(files::tree))
+        .route("/projects/{id}/file", get(files::read).put(files::write))
+        .route("/preview", get(preview::get).put(preview::select))
+        .route("/preview/start", post(preview::start))
+        .route("/preview/stop", post(preview::stop))
         .layer(middleware::from_fn_with_state(st.clone(), auth::require_session));
     let public = Router::new()
         .route("/auth/setup", post(auth::setup))
@@ -76,7 +85,7 @@ pub fn router(st: Arc<AppState>) -> Router {
         .nest("/api/v1", api)
         .fallback(static_asset)
         .layer(CompressionLayer::new())
-        .layer(middleware::from_fn(auth::security_headers))
+        .layer(middleware::from_fn_with_state(st.clone(), auth::security_headers))
         .layer(middleware::from_fn_with_state(st.clone(), auth::host_guard))
         .with_state(st)
 }
@@ -143,6 +152,18 @@ pub async fn has_password(db: &patina_store::Db) -> Result<bool, patina_store::S
     Ok(patina_store::auth::get_setting(db, patina_store::auth::PASSWORD_HASH)
         .await?
         .is_some())
+}
+
+/// Serve the preview on its own listener until shutdown. It binds to loopback only; see `preview`.
+pub async fn serve_preview(
+    listener: tokio::net::TcpListener,
+    st: Arc<AppState>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
+    let addr = listener.local_addr()?;
+    let _ = st.preview.addr.set(addr);
+    tracing::info!(%addr, "preview listening");
+    axum::serve(listener, preview::router(st)).with_graceful_shutdown(shutdown).await
 }
 
 /// Bind the listener. Split from `serve` so callers (and tests) can learn the real port.

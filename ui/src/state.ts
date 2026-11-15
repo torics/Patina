@@ -1,6 +1,7 @@
 import { signal } from "@preact/signals";
 import type { AgentConfig } from "./api/generated/AgentConfig";
 import type { Budgets } from "./api/generated/Budgets";
+import type { ApprovalView } from "./api/generated/ApprovalView";
 import type { Event } from "./api/generated/Event";
 import type { ProjectView } from "./api/generated/ProjectView";
 import type { ProviderView } from "./api/generated/ProviderView";
@@ -31,6 +32,54 @@ export const selectedRun = signal<string | null>(null);
 export const timeline = signal<Timeline>(emptyTimeline());
 export const notice = signal<string | null>(null);
 
+/** Read a convenience setting from browser storage. Storage may be missing or blocked; the default then holds. */
+export function remembered(key: string, fallback: string): string {
+  try {
+    return localStorage.getItem(`patina.${key}`) ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+export function remember(key: string, value: string) {
+  try {
+    localStorage.setItem(`patina.${key}`, value);
+  } catch {
+    // Only a convenience: nothing breaks without it.
+  }
+}
+
+/** The project new runs use and the file tree shows; empty for a plain chat. Remembered between visits. */
+export const currentProject = signal(remembered("project", ""));
+export function chooseProject(id: string) {
+  currentProject.value = id;
+  remember("project", id);
+}
+export type RightTab = "changes" | "editor" | "preview";
+export const rightTab = signal<RightTab>("changes");
+/** On a phone one pane shows at a time; the run comes first. */
+export type PhonePane = "run" | "files" | RightTab;
+export const phonePane = signal<PhonePane>("run");
+/** Show a tab of the right pane, which on a phone is a pane of its own. */
+export function showTab(tab: RightTab) {
+  rightTab.value = tab;
+  phonePane.value = tab;
+}
+/** The file open in the editor: from the project's checkout, or from a run's worktree. */
+export const openFile = signal<{ project: string; run: string | null; path: string } | null>(null);
+/** Approvals waiting across every run, so the header can point at them. */
+export const pendingApprovals = signal<ApprovalView[]>([]);
+/** Where the preview listener is, as the daemon reports it. */
+export const previewPort = signal<number | null>(null);
+export const previewOrigin = signal<string | null>(null);
+
+export type Theme = "dark" | "light";
+export const theme = signal<Theme>(remembered("theme", "dark") === "light" ? "light" : "dark");
+export function applyTheme(next: Theme) {
+  theme.value = next;
+  document.documentElement.dataset.theme = next;
+  remember("theme", next);
+}
+
 export function report(e: unknown) {
   if (e instanceof ApiError && e.status === 401) {
     screen.value = "login";
@@ -53,6 +102,7 @@ export async function boot() {
 export async function enter() {
   await refresh();
   screen.value = "app";
+  watchApprovals();
   // First use: go to settings until there is something to chat with.
   if (agents.value.length === 0) view.value = "settings";
   const fromHash = new URLSearchParams(location.hash.slice(1)).get("run");
@@ -64,6 +114,22 @@ export async function refresh() {
   const [p, a, t, tpl, r, pr, sys] = await Promise.all([api.providers(), api.agents(), api.teams(), api.templates(), api.runs(), api.projects(), api.system()]);
   [providers.value, agents.value, teams.value, templates.value, runs.value, projects.value] = [p, a, t, tpl, r, pr];
   [toolNames.value, sandbox.value, retentionDays.value] = [sys.tools, sys.sandbox, sys.retention_days];
+  [previewPort.value, previewOrigin.value] = [sys.preview_port, sys.preview_origin];
+  if (currentProject.value && !pr.some((x) => x.id === currentProject.value)) chooseProject("");
+  await refreshApprovals();
+}
+
+export async function refreshApprovals() {
+  pendingApprovals.value = await api.pendingApprovals();
+}
+
+let polling: ReturnType<typeof setInterval> | null = null;
+/** Keep the header's count of waiting approvals current, including those of runs not on screen. */
+export function watchApprovals() {
+  if (polling) return;
+  polling = setInterval(() => {
+    if (screen.value === "app" && !document.hidden) refreshApprovals().catch(() => {});
+  }, 5000);
 }
 
 let source: EventSource | null = null;
@@ -72,6 +138,9 @@ let source: EventSource | null = null;
 export function openRun(id: string) {
   source?.close();
   selectedRun.value = id;
+  phonePane.value = "run";
+  const run = runs.value.find((r) => r.id === id);
+  if (run?.project_id && run.project_id !== currentProject.value) chooseProject(run.project_id);
   timeline.value = emptyTimeline();
   history.replaceState(null, "", `#run=${id}`);
   connect(id, 1000);
@@ -100,6 +169,7 @@ function connect(id: string, retryMs: number) {
     const before = timeline.value.status;
     timeline.value = applyEvent(timeline.value, ev);
     wait = 1000;
+    if (ev.type === "approval_requested" || ev.type === "approval_resolved" || ev.type === "run_finished") refreshApprovals().catch(() => {});
     // The run list shows each run's status, so refresh this run when its status changes.
     if (timeline.value.status !== before) reloadRun(id).catch(report);
   };
@@ -132,9 +202,10 @@ export async function continueRun(id: string, message: string | null) {
 }
 
 /** Who runs: `team:<id>` or `agent:<id>`, as the composer's picker holds it. */
-export async function startRun(who: string, prompt: string, projectId: string | null, budgets: Budgets | null) {
+export async function startRun(who: string, prompt: string, projectId: string | null, budgets: Budgets | null, attachments: string[] = []) {
   const [kind, id] = who.split(/:(.*)/s);
-  const run = await api.createRun(kind === "team" ? { agent_id: "", team_id: id, prompt, project_id: projectId, budgets } : { agent_id: id, team_id: null, prompt, project_id: projectId, budgets });
+  const common = { prompt, project_id: projectId, budgets, attachments };
+  const run = await api.createRun(kind === "team" ? { agent_id: "", team_id: id, ...common } : { agent_id: id, team_id: null, ...common });
   runs.value = [run, ...runs.value];
   openRun(run.id);
 }
