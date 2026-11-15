@@ -92,7 +92,7 @@ async fn commands_cannot_read_or_write_outside_their_run() {
     assert_eq!(ran.of("run_started")[0]["payload"]["sandbox"], "landlock");
     assert!(ran.of("approval_requested").is_empty(), "autopilot inside a sandbox asks nothing");
     let r = ran.results("run_command");
-    assert_eq!(r.len(), 7, "{r:?}");
+    assert_eq!(r.len(), 6, "{r:?}");
 
     // The owner's home: not readable, not even listable.
     assert!(

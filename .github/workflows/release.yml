@@ -1,0 +1,138 @@
+name: release
+# A tag such as v0.2.0 builds every target, writes checksums and third-party notices, publishes a GitHub release
+# with the install script, and pushes a container image. The tag must match the version in Cargo.toml.
+on:
+  push:
+    tags: ["v*"]
+    branches: [m8-wip]  # TEMPORARY: exercise the build matrix before merging
+  # A manual run builds and checks everything but publishes nothing.
+  workflow_dispatch:
+env:
+  CARGO_TERM_COLOR: always
+permissions:
+  contents: read
+jobs:
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: ui/package-lock.json }
+      # The generated API types are committed, and CI checks that they are current, so the UI builds from them.
+      - run: npm ci --no-audit --no-fund && npm run build
+        working-directory: ui
+      - uses: actions/upload-artifact@v4
+        with: { name: ui-dist, path: ui/dist, if-no-files-found: error }
+
+  notices:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-about --locked
+      - run: cargo about generate --config packaging/about.toml --manifest-path crates/patina/Cargo.toml packaging/about.hbs -o THIRD_PARTY_NOTICES.html
+      - uses: actions/upload-artifact@v4
+        with: { name: notices, path: THIRD_PARTY_NOTICES.html, if-no-files-found: error }
+
+  build:
+    needs: [ui, notices]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest, zig: true }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-latest, zig: true }
+          - { target: x86_64-apple-darwin, os: macos-latest }
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+    runs-on: ${{ matrix.os }}
+    env:
+      PATINA_COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: ui-dist, path: ui/dist }
+      - uses: actions/download-artifact@v4
+        with: { name: notices, path: notices }
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: "${{ matrix.target }}" }
+      - name: Zig for the static Linux builds
+        if: matrix.zig
+        run: pip install ziglang && cargo install cargo-zigbuild --locked
+      - name: Build
+        shell: bash
+        run: |
+          if [ "${{ matrix.zig }}" = "true" ]; then
+            cargo zigbuild --release --locked -p patina --target ${{ matrix.target }}
+          else
+            cargo build --release --locked -p patina --target ${{ matrix.target }}
+          fi
+      - name: Package
+        shell: bash
+        run: |
+          name=patina-${{ matrix.target }}
+          mkdir -p "$name" out
+          ext=""; [[ "${{ matrix.target }}" == *windows* ]] && ext=".exe"
+          cp "target/${{ matrix.target }}/release/patina$ext" "$name/"
+          cp README.md LICENSE-MIT LICENSE-APACHE SECURITY.md notices/THIRD_PARTY_NOTICES.html "$name/"
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            7z a "out/$name.zip" "$name" > /dev/null
+          else
+            tar -czf "out/$name.tar.gz" "$name"
+          fi
+      - name: The Linux binary is static and runs
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          file target/${{ matrix.target }}/release/patina | tee /dev/stderr | grep -q "statically linked"
+          target/${{ matrix.target }}/release/patina version
+      - uses: actions/upload-artifact@v4
+        with: { name: "build-${{ matrix.target }}", path: out/*, if-no-files-found: error }
+      - uses: actions/upload-artifact@v4
+        if: contains(matrix.target, 'linux')
+        with: { name: "bin-${{ matrix.target }}", path: "target/${{ matrix.target }}/release/patina", if-no-files-found: error }
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag matches the version in Cargo.toml
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          [ "${GITHUB_REF_NAME}" = "v$version" ] || { echo "tag ${GITHUB_REF_NAME} is not v$version"; exit 1; }
+      - uses: actions/download-artifact@v4
+        with: { pattern: build-*, path: dist, merge-multiple: true }
+      - name: Checksums and install script
+        run: |
+          cp packaging/install.sh dist/
+          cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "Patina $GITHUB_REF_NAME" --generate-notes --verify-tag
+
+  image:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: bin-x86_64-unknown-linux-musl, path: packaging/bin/amd64 }
+      - uses: actions/download-artifact@v4
+        with: { name: bin-aarch64-unknown-linux-musl, path: packaging/bin/arm64 }
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ github.token }}" }
+      - name: Build and push
+        run: |
+          image=ghcr.io/$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')/patina
+          docker buildx build packaging --platform linux/amd64,linux/arm64 \
+            --tag "$image:${GITHUB_REF_NAME#v}" --tag "$image:latest" --push
