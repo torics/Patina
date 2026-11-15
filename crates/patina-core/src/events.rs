@@ -13,6 +13,8 @@ pub enum EventType {
     ApprovalRequested,
     ApprovalResolved,
     ToolResult,
+    /// A message the owner sent to a run after it started.
+    UserMessage,
     Usage,
     Checkpoint,
     Compaction,
@@ -33,6 +35,7 @@ impl EventType {
             EventType::ApprovalRequested => "approval_requested",
             EventType::ApprovalResolved => "approval_resolved",
             EventType::ToolResult => "tool_result",
+            EventType::UserMessage => "user_message",
             EventType::Usage => "usage",
             EventType::Checkpoint => "checkpoint",
             EventType::Compaction => "compaction",

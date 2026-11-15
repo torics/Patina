@@ -10,7 +10,6 @@ use axum::{
 };
 use patina_core::api::*;
 use patina_core::events::EventType;
-use patina_core::provider::Message;
 use patina_store::runs as store;
 use patina_tools::git::{self, GitError, Merged};
 use serde::Deserialize;
@@ -141,8 +140,7 @@ pub async fn rollback(State(st): St, Path(id): Path<String>, Json(input): Json<R
     )
     .await?;
     // The agent's context still describes the old files. Leave it a note for when the run continues.
-    if let Some(agent) = run.team_id.strip_prefix("agent:") {
-        let idx = store::message_count(&st.db, &id, agent).await?;
+    {
         let to = if input.step == 0 {
             "its starting point".to_string()
         } else {
@@ -151,7 +149,9 @@ pub async fn rollback(State(st): St, Path(id): Path<String>, Json(input): Json<R
         let note = format!(
             "Note from Patina: the owner rolled the workspace back to {to}. Files may differ from what you last saw; read them again before editing."
         );
-        store::save_message(&st.db, &id, agent, idx, &Message::user(note)).await?;
+        // Delivered like a message from the owner, before the agent's next turn, so it never lands between a
+        // tool call and its result.
+        store::add_steering(&st.db, &patina_core::events::new_id(), &id, &note).await?;
     }
     checkpoints(State(st), Path(id)).await
 }

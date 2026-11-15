@@ -37,7 +37,20 @@ export interface CheckpointItem {
   summary: string;
 }
 
-export type Item = TextItem | ToolItem | CheckpointItem;
+/** Something that happened to the run itself: a pause, a resume, a shortened context. */
+export interface NoteItem {
+  kind: "note";
+  text: string;
+  tone: "info" | "warn";
+}
+
+/** A message the owner sent while the run was going; the agent read it at this point. */
+export interface MessageItem {
+  kind: "message";
+  text: string;
+}
+
+export type Item = TextItem | ToolItem | CheckpointItem | NoteItem | MessageItem;
 
 export interface AgentBlock {
   agentId: string;
@@ -89,11 +102,30 @@ function lastBlock(t: Timeline, agentId: string | null): AgentBlock | undefined 
   return undefined;
 }
 
-/** Replace the tool item with this call id, if the block has it. */
-function updateTool(block: AgentBlock | undefined, id: unknown, change: (item: ToolItem) => ToolItem) {
-  if (!block) return;
-  block.items = block.items.map((i) => (i.kind === "tool" && i.id === id ? change(i) : i));
+/** Replace the latest tool item with this call id among the agent's blocks. A resumed run may answer a call
+ * that an earlier block made. Call ids can repeat between turns, so the latest one wins. */
+function updateTool(t: Timeline, agentId: string | null, id: unknown, change: (item: ToolItem) => ToolItem) {
+  for (let b = t.blocks.length - 1; b >= 0; b--) {
+    const block = t.blocks[b];
+    if (block.agentId !== agentId) continue;
+    for (let i = block.items.length - 1; i >= 0; i--) {
+      const item = block.items[i];
+      if (item.kind === "tool" && item.id === id) {
+        block.items = block.items.map((x, n) => (n === i ? change(item) : x));
+        return;
+      }
+    }
+  }
 }
+
+/** Add a note to the latest block, whichever agent it belongs to. */
+function note(t: Timeline, text: string, tone: NoteItem["tone"] = "info") {
+  const block = t.blocks[t.blocks.length - 1];
+  if (block) block.items = [...block.items, { kind: "note", text, tone }];
+}
+
+/** Statuses a run can end a stretch of work in and later continue from. */
+const STOPPED_FOR_NOW = ["paused", "interrupted", "failed", "budget_exceeded"];
 
 /** Apply one persisted event. Events at or below `lastSeq` are duplicates and are ignored. */
 export function applyEvent(t: Timeline, ev: Event): Timeline {
@@ -103,6 +135,10 @@ export function applyEvent(t: Timeline, ev: Event): Timeline {
   const block = lastBlock(next, ev.agent_id);
   switch (ev.type) {
     case "run_started":
+      if (p.resumed) {
+        note(next, "Resumed.");
+        next.error = null;
+      }
       next.prompt = String(p.prompt ?? "");
       next.status = "running";
       next.hasWorkspace = Boolean(p.has_workspace);
@@ -111,6 +147,12 @@ export function applyEvent(t: Timeline, ev: Event): Timeline {
       next.sandboxDetail = typeof p.sandbox_detail === "string" ? p.sandbox_detail : null;
       break;
     case "agent_started":
+      // An agent that continues after a pause or a restart picks up its own block again.
+      if (block && STOPPED_FOR_NOW.includes(block.status ?? "")) {
+        block.finishedAt = null;
+        block.status = null;
+        break;
+      }
       next.blocks.push({
         agentId: ev.agent_id ?? "",
         name: String(p.name ?? ev.agent_id ?? ""),
@@ -153,11 +195,11 @@ export function applyEvent(t: Timeline, ev: Event): Timeline {
       }
       break;
     case "approval_requested":
-      updateTool(block, p.tool_call_id, (i) => ({ ...i, state: "waiting", diff: p.diff ?? null, approval: { id: String(p.approval_id), state: "pending", note: null } }));
+      updateTool(next, ev.agent_id, p.tool_call_id, (i) => ({ ...i, state: "waiting", diff: p.diff ?? null, approval: { id: String(p.approval_id), state: "pending", note: null } }));
       next.status = "waiting_approval";
       break;
     case "approval_resolved":
-      updateTool(block, p.tool_call_id, (i) => ({
+      updateTool(next, ev.agent_id, p.tool_call_id, (i) => ({
         ...i,
         state: p.action === "deny" ? "denied" : "running",
         approval: { id: String(p.approval_id), state: p.action, note: p.note ?? null },
@@ -169,12 +211,29 @@ export function applyEvent(t: Timeline, ev: Event): Timeline {
         next.setup = next.setup.map((i) => (i.id === p.id ? { ...i, state: p.is_error ? "failed" : "done", result: String(p.content ?? ""), artifact: p.artifact ?? null } : i));
         break;
       }
-      updateTool(block, p.id, (i) => ({
+      updateTool(next, ev.agent_id, p.id, (i) => ({
         ...i,
         state: i.state === "denied" ? "denied" : p.is_error ? "failed" : "done",
         result: String(p.content ?? ""),
         artifact: p.artifact ?? null,
       }));
+      break;
+    case "user_message":
+      if (block) {
+        block.items = [...block.items, { kind: "message", text: String(p.text ?? "") }];
+        block.pending = "";
+      }
+      break;
+    case "compaction":
+      if (block) {
+        const before = Number(p.tokens_before ?? 0).toLocaleString("en-US");
+        const after = Number(p.tokens_after ?? 0).toLocaleString("en-US");
+        const what =
+          p.stage === "summary"
+            ? `summarized the ${p.turns_summarized} oldest turns and kept the latest ${p.turns_kept} word for word`
+            : `replaced ${p.outputs_replaced} old tool outputs with a pointer to their saved copy`;
+        block.items = [...block.items, { kind: "note", text: `To stay within the model's context, Patina ${what} (about ${after} tokens, down from ${before}).`, tone: "info" }];
+      }
       break;
     case "checkpoint":
       if (block) block.items = [...block.items, { kind: "checkpoint", step: Number(p.step), summary: String(p.summary ?? "") }];
@@ -209,6 +268,8 @@ export function applyEvent(t: Timeline, ev: Event): Timeline {
       break;
     case "run_finished":
       next.status = String(p.status ?? "completed");
+      if (next.status === "paused") note(next, p.reason === "owner" ? "Paused. Resume it, or send the agent a message." : String(p.error ?? "Paused."), p.reason === "owner" ? "info" : "warn");
+      if (next.status === "interrupted") note(next, String(p.error ?? "Patina stopped while this run was in progress."), "warn");
       next.error = p.error ? String(p.error) : null;
       next.usage = p.usage ?? next.usage;
       // A request nobody answered before the run ended can no longer be answered.
@@ -240,6 +301,11 @@ export function visibleText(b: AgentBlock): string {
 /** The tool calls that are waiting for the owner's answer. */
 export function waitingApprovals(t: Timeline): ToolItem[] {
   return t.blocks.flatMap((b) => b.items.filter((i): i is ToolItem => i.kind === "tool" && i.approval?.state === "pending"));
+}
+
+/** True while the run is working or waiting for the owner: there may be more to follow live. */
+export function isActive(status: string): boolean {
+  return ["queued", "running", "waiting_approval"].includes(status);
 }
 
 export function isTerminal(status: string): boolean {

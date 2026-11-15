@@ -2,9 +2,9 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import type { Budgets } from "./api/generated/Budgets";
 import { api } from "./api";
 import { Changes } from "./changes";
-import { isTerminal, type AgentBlock, type ToolItem } from "./reducer";
+import { isActive, type AgentBlock, type ToolItem } from "./reducer";
 import { patternMatches, suggestPattern } from "./policy";
-import { agents, closeRun, openRun, projects, report, runs, selectedRun, startRun, timeline } from "./state";
+import { agents, closeRun, continueRun, openRun, projects, report, runs, selectedRun, startRun, timeline } from "./state";
 
 const DEFAULTS = { steps: "50", tokens: "2000000", cost: "", minutes: "120" };
 
@@ -243,6 +243,14 @@ function Block({ runId, b }: { runId: string; b: AgentBlock }) {
       {b.items.map((i, idx) => {
         if (i.kind === "text") return i.discarded ? null : <div class="text">{i.text + (joinTail && idx === b.items.length - 1 ? b.pending : "")}</div>;
         if (i.kind === "tool") return <ToolCard key={i.id} runId={runId} item={i} />;
+        if (i.kind === "message")
+          return (
+            <div class="bubble user steer">
+              <small>You, during the run</small>
+              <div>{i.text}</div>
+            </div>
+          );
+        if (i.kind === "note") return <p class={`note ${i.tone}`}>{i.text}</p>;
         return (
           <p class="checkpoint">
             Checkpoint after step {i.step}: {i.summary}
@@ -259,16 +267,25 @@ function Block({ runId, b }: { runId: string; b: AgentBlock }) {
   );
 }
 
+/** Whether the run's limits leave room for another step, so a run stopped by one can resume. */
+function budgetRaised(run: { budgets: Budgets; usage: { steps: number; input_tokens: number; output_tokens: number; cost_usd: number | null; elapsed_s: number } }): boolean {
+  const { budgets: b, usage: u } = run;
+  if (u.steps >= b.max_steps || u.input_tokens + u.output_tokens >= b.max_tokens) return false;
+  if (b.max_cost_usd !== null && u.cost_usd !== null && u.cost_usd >= b.max_cost_usd) return false;
+  return b.max_wall_clock_s === null || u.elapsed_s < b.max_wall_clock_s;
+}
+
 function LimitsEditor({ runId, budgets }: { runId: string; budgets: Budgets }) {
   const [steps, setSteps] = useState(String(budgets.max_steps));
   const [tokens, setTokens] = useState(String(budgets.max_tokens));
+  const [minutes, setMinutes] = useState(budgets.max_wall_clock_s === null ? "" : String(budgets.max_wall_clock_s / 60));
   const [saved, setSaved] = useState(false);
   async function save(e: Event) {
     e.preventDefault();
-    const [s, t] = [positive(steps), positive(tokens)];
-    if (s === null || t === null) return report(new Error("Steps and tokens must be numbers above zero."));
+    const [s, t, m] = [positive(steps), positive(tokens), positive(minutes)];
+    if (s === null || t === null || (minutes.trim() !== "" && m === null)) return report(new Error("Steps and tokens must be numbers above zero. Minutes must be a number above zero, or empty for no limit."));
     try {
-      const run = await api.setBudgets(runId, { max_steps: Math.floor(s), max_tokens: Math.floor(t) });
+      const run = await api.setBudgets(runId, { max_steps: Math.floor(s), max_tokens: Math.floor(t), max_wall_clock_s: m === null ? null : Math.round(m * 60) });
       runs.value = runs.value.map((r) => (r.id === runId ? run : r));
       setSaved(true);
     } catch (err) {
@@ -287,10 +304,57 @@ function LimitsEditor({ runId, budgets }: { runId: string; budgets: Budgets }) {
           Tokens
           <input value={tokens} inputMode="numeric" onInput={(e) => (setTokens(e.currentTarget.value), setSaved(false))} />
         </label>
+        <label>
+          Minutes (empty for no limit)
+          <input value={minutes} inputMode="decimal" onInput={(e) => (setMinutes(e.currentTarget.value), setSaved(false))} />
+        </label>
         <button type="submit">Save limits</button>
         {saved && <span class="ok">Saved.</span>}
       </form>
     </details>
+  );
+}
+
+/** Talk to a run: a message reaches the agent before its next step, and resumes a paused or interrupted run. */
+function MessageBox({ runId, live }: { runId: string; live: boolean }) {
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [sent, setSent] = useState(false);
+  async function send(e: Event) {
+    e.preventDefault();
+    if (!text.trim()) return;
+    setBusy(true);
+    try {
+      await continueRun(runId, text.trim());
+      setText("");
+      setSent(true);
+    } catch (err) {
+      report(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <form class="composer steer" onSubmit={send}>
+      <label>
+        {live ? "Message the agent. It reads this before its next step." : "Message the agent. Sending resumes the run."}
+        <textarea
+          name="message"
+          rows={2}
+          value={text}
+          onInput={(e) => (setText(e.currentTarget.value), setSent(false))}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) send(e);
+          }}
+        />
+      </label>
+      <div class="row">
+        <button type="submit" disabled={busy || !text.trim()}>
+          {live ? "Send" : "Send and resume"}
+        </button>
+        {sent && live && <span class="muted">Sent. It appears in the timeline when the agent reads it.</span>}
+      </div>
+    </form>
   );
 }
 
@@ -302,8 +366,10 @@ function Timeline() {
   useEffect(() => {
     end.current?.scrollIntoView({ block: "nearest" });
   }, [t.lastSeq]);
-  const live = !isTerminal(t.status);
+  const live = isActive(t.status);
   const u = t.usage;
+  const [pausing, setPausing] = useState(false);
+  useEffect(() => setPausing(false), [id, live]);
   return (
     <section class="timeline">
       <div class="row">
@@ -314,8 +380,25 @@ function Timeline() {
           </span>
         )}
         {live && (
-          <button class="danger" onClick={() => api.cancelRun(id).catch(report)}>
+          <button
+            title="Stop after the current step. The run can be resumed."
+            disabled={pausing}
+            onClick={() => {
+              setPausing(true);
+              api.pauseRun(id).catch((e) => (setPausing(false), report(e)));
+            }}
+          >
+            {pausing ? "Pausing after this step" : "Pause"}
+          </button>
+        )}
+        {live && (
+          <button class="danger" title="End the run. It cannot be resumed." onClick={() => api.cancelRun(id).catch(report)}>
             Stop
+          </button>
+        )}
+        {!live && run?.can_resume && (
+          <button onClick={() => continueRun(id, null).catch(report)} disabled={t.status === "budget_exceeded" && !budgetRaised(run)}>
+            Resume
           </button>
         )}
         <button class="link" onClick={closeRun}>
@@ -329,7 +412,7 @@ function Timeline() {
           {run ? ` of ${run.budgets.max_tokens.toLocaleString("en-US")}` : ""} tokens{u.estimated ? " (estimated)" : ""} · cost {u.cost_usd == null ? "unknown" : `$${u.cost_usd.toFixed(4)}`}
         </p>
       )}
-      {live && run && <LimitsEditor key={id} runId={id} budgets={run.budgets} />}
+      {(live || t.status === "budget_exceeded") && run && <LimitsEditor key={id} runId={id} budgets={run.budgets} />}
       {t.dirtyCheckout && <p class="warn">Your checkout had uncommitted changes when this run started. The run works from the last commit and does not include them.</p>}
       {t.prompt && <div class="bubble user">{t.prompt}</div>}
       {t.setup.length > 0 && (
@@ -350,7 +433,8 @@ function Timeline() {
       {t.rollbacks.map((step) => (
         <p class="checkpoint">You rolled the files back to {step === 0 ? "the starting point" : `the checkpoint of step ${step}`}.</p>
       ))}
-      {(t.status === "failed" || t.status === "budget_exceeded") && t.error && <p class="error">{t.status === "failed" ? `Run failed: ${t.error}` : `${t.error} The run stopped.`}</p>}
+      {(t.status === "failed" || t.status === "budget_exceeded") && t.error && <p class="error">{t.status === "failed" ? `Run failed: ${t.error}` : t.error}</p>}
+      {(live || run?.can_resume) && t.status !== "budget_exceeded" && <MessageBox key={id} runId={id} live={live} />}
       {run?.branch || run?.disposition ? <Changes key={id} run={run} live={live} /> : null}
       <div ref={end} />
     </section>

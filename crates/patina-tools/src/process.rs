@@ -114,9 +114,20 @@ fn group_alive(pid: u32) -> bool {
 
 /// Kill every process that carries `marker` in its environment, wherever it went. A process can leave its
 /// process group, but it inherits its environment. Returns how many were found.
-#[cfg(target_os = "linux")]
 pub fn sweep(marker: &str) -> usize {
     let needle = format!("{MARKER_VAR}={marker}").into_bytes();
+    kill_where(|var| var == needle.as_slice())
+}
+
+/// Kill every process that any command of one run started. Used when a run is found whose Patina process
+/// died: nothing else would stop what it left behind. Returns how many were found.
+pub fn sweep_run(run_id: &str) -> usize {
+    let prefix = format!("{MARKER_VAR}={run_id}-").into_bytes();
+    kill_where(|var| var.starts_with(&prefix))
+}
+
+#[cfg(target_os = "linux")]
+fn kill_where(matches: impl Fn(&[u8]) -> bool) -> usize {
     let me = std::process::id();
     let mut killed = 0;
     let Ok(entries) = std::fs::read_dir("/proc") else { return 0 };
@@ -130,7 +141,7 @@ pub fn sweep(marker: &str) -> usize {
         let Ok(environ) = std::fs::read(entry.path().join("environ")) else {
             continue;
         };
-        if environ.split(|b| *b == 0).any(|var| var == needle.as_slice())
+        if environ.split(|b| *b == 0).any(&matches)
             && let Some(p) = rustix::process::Pid::from_raw(pid as i32)
             && rustix::process::kill_process(p, rustix::process::Signal::KILL).is_ok()
         {
@@ -141,8 +152,63 @@ pub fn sweep(marker: &str) -> usize {
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn sweep(_marker: &str) -> usize {
+fn kill_where(_matches: impl Fn(&[u8]) -> bool) -> usize {
     0
+}
+
+/// When a process started, in clock ticks since boot: field 22 of `/proc/<pid>/stat`. It tells a process from
+/// a later one that got the same number.
+#[cfg(target_os = "linux")]
+fn start_time(pid: u32) -> Option<String> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The second field is the program name in parentheses and may contain spaces; count from its end.
+    let rest = &stat[stat.rfind(')')? + 1..];
+    rest.split_whitespace().nth(19).map(str::to_string)
+}
+
+/// A name for this process that no other process has, now or later: its number and, on Linux, its start time.
+/// A run records it to say who is working on it.
+pub fn identity() -> String {
+    let pid = std::process::id();
+    #[cfg(target_os = "linux")]
+    if let Some(t) = start_time(pid) {
+        return format!("{pid}:{t}");
+    }
+    pid.to_string()
+}
+
+/// Whether the process that `identity` names is still running. This process itself counts as running only
+/// under its own identity, so a restarted daemon that got the same number is not taken for the old one.
+pub fn alive(identity: &str) -> bool {
+    if identity == self::identity() {
+        return true;
+    }
+    let (pid, started) = match identity.split_once(':') {
+        Some((p, t)) => (p, Some(t)),
+        None => (identity, None),
+    };
+    let Ok(pid) = pid.parse::<u32>() else { return false };
+    if pid == std::process::id() {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        match (start_time(pid), started) {
+            (None, _) => false,
+            (Some(now), Some(then)) => now == then,
+            (Some(_), None) => true,
+        }
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        let _ = started;
+        rustix::process::Pid::from_raw(pid as i32).is_some_and(|p| rustix::process::test_kill_process(p).is_ok())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = started;
+        false
+    }
 }
 
 impl Running {
@@ -239,6 +305,47 @@ pub async fn run(sandbox: &dyn Sandbox, prepared: &Prepared, marker: &str, timeo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_process_identity_outlives_its_number() {
+        let me = identity();
+        assert!(alive(&me), "{me}");
+        // The same number under another start time is another process: a restarted daemon is not the old one.
+        let pid = std::process::id();
+        assert!(!alive(&format!("{pid}:1")));
+        assert!(!alive(&pid.to_string()) || !me.contains(':'));
+        assert!(!alive("not a process"));
+        // A child is alive while it runs and gone once it was reaped.
+        #[cfg(target_os = "linux")]
+        {
+            let mut child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+            let id = format!("{}:{}", child.id(), start_time(child.id()).unwrap());
+            assert!(alive(&id));
+            assert!(alive(&child.id().to_string()));
+            child.kill().unwrap();
+            child.wait().unwrap();
+            assert!(!alive(&id));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_dead_runs_processes_are_found_by_its_id_alone() {
+        let spawn = |marker: &str| {
+            std::process::Command::new("sleep")
+                .arg("30")
+                .env(MARKER_VAR, marker)
+                .spawn()
+                .unwrap()
+        };
+        let (mut a, mut b, mut other) = (spawn("run-one-1"), spawn("run-one-27"), spawn("run-one2-1"));
+        assert_eq!(sweep_run("run-one"), 2);
+        assert!(!a.wait().unwrap().success() && !b.wait().unwrap().success());
+        // Another run is not touched, even one whose id starts the same way.
+        assert!(other.try_wait().unwrap().is_none());
+        other.kill().unwrap();
+        other.wait().unwrap();
+    }
 
     #[test]
     fn the_capture_keeps_the_newest_output_and_knows_what_it_dropped() {

@@ -1,6 +1,6 @@
 use crate::auth::Limiter;
 use crate::error::{ApiError, ApiResult};
-use patina_core::agent::{Allowlist, ApprovalDecision};
+use patina_core::agent::{Allowlist, ApprovalDecision, Signals};
 use patina_core::agent_config::AgentConfig;
 use patina_core::budget::BudgetTracker;
 use patina_core::config::write_atomic;
@@ -49,6 +49,8 @@ pub struct RunHandle {
     pub pending: Mutex<HashMap<String, oneshot::Sender<ApprovalDecision>>>,
     /// The project's command allowlist as this run sees it. A pattern added while approving lands here at once.
     pub allow_commands: Allowlist,
+    /// Pause and shutdown requests the loop honors at its next safe point.
+    pub signals: Arc<Signals>,
 }
 
 pub struct AppState {
@@ -61,6 +63,8 @@ pub struct AppState {
     pub runs: Mutex<HashMap<String, Arc<RunHandle>>>,
     /// The Patina binary, which holds the Landlock helper. Tests point it at the built binary.
     pub helper: PathBuf,
+    /// This process, as recorded on the runs it drives.
+    pub identity: String,
     caps: tokio::sync::OnceCell<Caps>,
     providers: Mutex<Option<(SystemTime, ProvidersFile)>>,
     registry: Mutex<HashMap<String, CachedProvider>>,
@@ -77,6 +81,7 @@ impl AppState {
             limiter: Mutex::new(Limiter::default()),
             runs: Mutex::default(),
             helper: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("patina")),
+            identity: patina_tools::process::identity(),
             caps: tokio::sync::OnceCell::new(),
             providers: Mutex::default(),
             registry: Mutex::default(),

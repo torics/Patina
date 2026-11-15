@@ -62,6 +62,23 @@ pub async fn detect_runtime() -> Option<(String, String)> {
     None
 }
 
+/// The name of a run's container. The tail of the run id is its random part.
+pub fn container_name(run_id: &str) -> String {
+    let hex: Vec<char> = run_id.chars().filter(|c| *c != '-').collect();
+    let tail: String = hex[hex.len().saturating_sub(8)..].iter().collect();
+    format!("patina-{tail}")
+}
+
+/// Remove a container if it exists, with everything running in it. Not finding it is not an error.
+pub async fn remove_container(runtime: &str, name: &str) {
+    let args = ["rm".to_string(), "-f".to_string(), name.to_string()];
+    if let Err(e) = client(runtime, &args, Duration::from_secs(60)).await
+        && !e.to_lowercase().contains("no such container")
+    {
+        tracing::warn!(container = %name, error = %e, "could not remove the container");
+    }
+}
+
 pub struct ContainerSandbox {
     setup: Setup,
     runtime: String,
@@ -166,6 +183,8 @@ impl Sandbox for ContainerSandbox {
         if *started {
             return Ok(());
         }
+        // A container of this name can only be a leftover of this run from before Patina stopped.
+        remove_container(&self.runtime, &self.setup.container_name).await;
         // Pulling an image can take minutes the first time.
         client(&self.runtime, &self.run_args(), Duration::from_secs(600))
             .await

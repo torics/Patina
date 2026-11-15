@@ -23,6 +23,8 @@ pub struct Daemon {
     pub csrf: String,
     pub dir: tempfile::TempDir,
     pub state: Arc<AppState>,
+    /// The scripted provider, to read the requests it received.
+    pub mock: Arc<MockProvider>,
 }
 
 pub async fn start(scripts: Vec<Script>, real_providers: bool) -> Daemon {
@@ -31,10 +33,11 @@ pub async fn start(scripts: Vec<Script>, real_providers: bool) -> Daemon {
     paths.ensure().unwrap();
     let db = patina_store::Db::open(&paths.database_file()).unwrap();
     let secrets = patina_store::secrets::Secrets::new(db.clone(), [3u8; 32]);
+    let scripted = Arc::new(MockProvider::new(scripts));
     let factory: patina_server::ProviderFactory = if real_providers {
         patina_server::genai_factory()
     } else {
-        let mock: Arc<dyn ChatProvider> = Arc::new(MockProvider::new(scripts));
+        let mock: Arc<dyn ChatProvider> = scripted.clone();
         Arc::new(move |_, _| Ok(mock.clone()))
     };
     let setup_token = patina_server::ensure_setup_token(&db).await.unwrap().unwrap();
@@ -54,6 +57,7 @@ pub async fn start(scripts: Vec<Script>, real_providers: bool) -> Daemon {
         csrf: String::new(),
         dir,
         state,
+        mock: scripted,
     }
 }
 

@@ -21,6 +21,14 @@ impl Scripted {
             requests: Mutex::default(),
         })
     }
+    /// One turn per path, each reading a different file, so the loop breaker stays out of the way.
+    fn reading(n: usize) -> Arc<Scripted> {
+        Scripted::new(
+            (0..n)
+                .map(|i| calls(&[("c", "read_file", json!({"path": format!("file{i}")}))]))
+                .collect(),
+        )
+    }
     fn repeating(turn: Script) -> Arc<Scripted> {
         Arc::new(Scripted {
             turns: Mutex::default(),
@@ -93,6 +101,10 @@ struct Host {
     artifacts: Mutex<Vec<(String, String)>>,
     /// When set, an approval request never resolves (the owner is away).
     hang: bool,
+    /// Messages from the owner: each time the loop asks, it gets the next batch.
+    inbox: Mutex<VecDeque<Vec<String>>>,
+    /// How often the stored history was replaced by a compacted one.
+    replaced: Mutex<u32>,
 }
 
 #[async_trait]
@@ -132,6 +144,14 @@ impl RunHost for Host {
     async fn save_artifact(&self, name: &str, content: &str) -> Result<String, HostError> {
         self.artifacts.lock().unwrap().push((name.to_string(), content.to_string()));
         Ok(format!("artifacts/{name}"))
+    }
+    async fn take_messages(&self, _: &str) -> Result<Vec<String>, HostError> {
+        Ok(self.inbox.lock().unwrap().pop_front().unwrap_or_default())
+    }
+    async fn replace_history(&self, _: &str, history: &[Message]) -> Result<(), HostError> {
+        *self.saved.lock().unwrap() = history[1..].to_vec();
+        *self.replaced.lock().unwrap() += 1;
+        Ok(())
     }
 }
 
@@ -203,6 +223,7 @@ fn spec() -> AgentSpec {
         temperature: None,
         max_output_tokens: None,
         price: None,
+        context_window: 128_000,
     }
 }
 
@@ -217,12 +238,13 @@ fn ctx<'a>(provider: Arc<Scripted>, host: &'a Host, tools: Vec<Arc<dyn Tool>>) -
         budget: Arc::new(BudgetTracker::new(Budgets::default())),
         project_instructions: None,
         cancel: CancellationToken::new(),
+        signals: Default::default(),
     }
 }
 
 async fn run(c: &RunCtx<'_>) -> (Outcome, Vec<Message>) {
     let mut h = vec![Message::user("do it")];
-    let out = run_agent(&spec(), c, &mut h).await;
+    let out = run_agent(&spec(), c, &mut h, vec![]).await;
     (out, h)
 }
 
@@ -382,7 +404,7 @@ async fn several_calls_in_one_turn_all_get_results_in_order() {
 async fn the_step_budget_stops_a_run_that_never_finishes() {
     let host = Host::default();
     let read = fake("read_file", ToolKind::Read, "body");
-    let p = Scripted::repeating(calls(&[("c", "read_file", json!({"path": "a"}))]));
+    let p = Scripted::reading(10);
     let mut c = ctx(p.clone(), &host, vec![read.clone()]);
     c.budget = Arc::new(BudgetTracker::new(Budgets {
         max_steps: 3,
@@ -407,11 +429,7 @@ async fn the_step_budget_stops_a_run_that_never_finishes() {
 async fn the_token_and_cost_budgets_stop_a_run() {
     let host = Host::default();
     let read = fake("read_file", ToolKind::Read, "body");
-    let mut c = ctx(
-        Scripted::repeating(calls(&[("c", "read_file", json!({"path": "a"}))])),
-        &host,
-        vec![read.clone()],
-    );
+    let mut c = ctx(Scripted::reading(10), &host, vec![read.clone()]);
     c.budget = Arc::new(BudgetTracker::new(Budgets {
         max_tokens: 40,
         ..Budgets::default()
@@ -436,7 +454,7 @@ async fn the_token_and_cost_budgets_stop_a_run() {
     let mut priced = spec();
     priced.price = Some(Price { input: 5.0, output: 10.0 });
     let mut h = vec![Message::user("go")];
-    assert_eq!(run_agent(&priced, &c, &mut h).await, Outcome::BudgetExceeded(Limit::Cost));
+    assert_eq!(run_agent(&priced, &c, &mut h, vec![]).await, Outcome::BudgetExceeded(Limit::Cost));
     assert_eq!(c.budget.usage().steps, 1);
 }
 
@@ -699,4 +717,430 @@ async fn a_tool_with_its_own_time_limit_is_not_cut_off_by_the_loop() {
     let (out, h) = run(&c).await;
     assert_eq!(out, Outcome::Completed);
     assert_eq!(result_of(&h[2], 0), ("exit code 0", false));
+}
+
+// ---- Pause, interruption, the loop breaker, messages from the owner, compaction.
+
+fn as_json(h: &[Message]) -> Value {
+    serde_json::to_value(h).unwrap()
+}
+
+/// Every tool call is answered in the very next message, and no result stands without its call.
+fn paired(h: &[Message]) -> bool {
+    let ids = |m: &Message, calls: bool| -> Vec<String> {
+        m.parts
+            .iter()
+            .filter_map(|p| match p {
+                Part::ToolCall { id, .. } if calls => Some(id.clone()),
+                Part::ToolResult { id, .. } if !calls => Some(id.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    h.iter().enumerate().all(|(i, m)| {
+        let next = h.get(i + 1).map(|n| ids(n, false)).unwrap_or_default();
+        let before = if i > 0 { ids(&h[i - 1], true) } else { vec![] };
+        (ids(m, true).is_empty() || ids(m, true) == next) && (ids(m, false).is_empty() || ids(m, false) == before)
+    })
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pause_waits_for_the_step_to_finish_and_the_run_continues_when_resumed() {
+    let host = Host::default();
+    let cmd = command_tool(10);
+    let p = Scripted::new(vec![calls(&[("c1", "run_command", json!({"command": "make"}))]), text("Built.")]);
+    let mut c = ctx(p.clone(), &host, vec![cmd.clone()]);
+    (c.policy, c.sandboxed) = (PolicyMode::Autopilot, true);
+    // The owner presses Pause while the command is running.
+    let signals = c.signals.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        signals.pause.store(true, Ordering::SeqCst);
+    });
+    let mut h = vec![Message::user("do it")];
+    assert_eq!(run_agent(&spec(), &c, &mut h, vec![]).await, Outcome::Paused(PauseReason::Owner));
+    // The command finished and its result is in the history: nothing is left half done.
+    assert_eq!(*cmd.seen.lock().unwrap(), ["make"]);
+    assert_eq!(h.len(), 3);
+    assert_eq!(result_of(&h[2], 0), ("exit code 0", false));
+    assert_eq!(p.requests.lock().unwrap().len(), 1, "no model turn after the pause");
+    assert_eq!(host.of("agent_finished")[0]["status"], "paused");
+    assert_eq!(host.checkpoints.lock().unwrap().len(), 1);
+
+    // Resumed with the same history: the loop goes on with the next model turn.
+    assert_eq!(run_agent(&spec(), &c, &mut h, vec![]).await, Outcome::Completed);
+    assert_eq!(p.requests.lock().unwrap().len(), 2);
+    assert_eq!(c.budget.usage().steps, 2);
+    assert_eq!(as_json(&host.saved.lock().unwrap()), as_json(&h[1..]));
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_same_call_three_times_in_a_row_pauses_the_run() {
+    let host = Host::default();
+    let read = fake("read_file", ToolKind::Read, "body");
+    let same = || calls(&[("c", "read_file", json!({"path": "a"}))]);
+    let other = || calls(&[("c", "read_file", json!({"path": "b"}))]);
+    let p = Scripted::new(vec![same(), same(), same(), same(), text("Found it.")]);
+    let c = ctx(p.clone(), &host, vec![read.clone()]);
+    let mut h = vec![Message::user("do it")];
+    let out = run_agent(&spec(), &c, &mut h, vec![]).await;
+    assert_eq!(out, Outcome::Paused(PauseReason::Loop { tool: "read_file".into() }));
+    assert_eq!(read.seen.lock().unwrap().len(), 3);
+    assert!(paired(&h) && h.len() == 7, "the third call still has its result");
+    let Outcome::Paused(reason) = out else { unreachable!() };
+    assert!(reason.describe().unwrap().contains("same read_file call 3 times in a row"));
+    assert_eq!(PauseReason::Owner.describe(), None);
+    // The owner resumes: the count starts again.
+    assert_eq!(run_agent(&spec(), &c, &mut h, vec![]).await, Outcome::Completed);
+    assert_eq!(read.seen.lock().unwrap().len(), 4);
+
+    // A different call in between is not a loop.
+    let host = Host::default();
+    let p = Scripted::new(vec![same(), same(), other(), same(), same(), text("ok")]);
+    assert_eq!(run(&ctx(p, &host, vec![read])).await.0, Outcome::Completed);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_message_from_the_owner_reaches_the_agent_before_its_next_turn() {
+    let host = Host::default();
+    let read = fake("read_file", ToolKind::Read, "body");
+    // Nothing waits at the start; one message arrives during the first step.
+    host.inbox
+        .lock()
+        .unwrap()
+        .extend([vec![], vec!["Use tabs, not spaces".to_string()]]);
+    let p = Scripted::new(vec![calls(&[("c1", "read_file", json!({"path": "a"}))]), text("Done, with tabs.")]);
+    let (out, h) = run(&ctx(p.clone(), &host, vec![read])).await;
+    assert_eq!(out, Outcome::Completed);
+    let requests = p.requests.lock().unwrap();
+    assert_eq!(requests[0].messages.len(), 1);
+    // The second request ends with the owner's message, after the tool results.
+    assert_eq!(requests[1].messages.len(), 4);
+    assert!(matches!(&requests[1].messages[3].parts[..], [Part::Text(t)] if t == "Use tabs, not spaces"));
+    assert_eq!(requests[1].messages[3].role, Role::User);
+    assert_eq!(host.of("user_message")[0]["text"], "Use tabs, not spaces");
+    let kinds = host.kinds();
+    let at = |k: &str| kinds.iter().rposition(|x| x == k).unwrap();
+    assert!(
+        at("tool_result") < at("user_message") && at("user_message") < at("text"),
+        "{kinds:?}"
+    );
+    assert_eq!(as_json(&host.saved.lock().unwrap()), as_json(&h[1..]));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_message_sent_during_the_last_turn_still_gets_an_answer() {
+    let host = Host::default();
+    host.inbox.lock().unwrap().extend([vec![], vec!["Also add a test".to_string()]]);
+    let p = Scripted::new(vec![text("Done."), text("Added a test.")]);
+    let (out, h) = run(&ctx(p.clone(), &host, vec![])).await;
+    assert_eq!(out, Outcome::Completed);
+    assert_eq!(p.requests.lock().unwrap().len(), 2);
+    assert_eq!(h.len(), 4);
+    assert!(matches!(&h[2].parts[..], [Part::Text(t)] if t == "Also add a test"));
+    assert!(matches!(&h[3].parts[..], [Part::Text(t)] if t == "Added a test."));
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_interrupted_turn_is_finished_call_by_call_when_the_run_resumes() {
+    let host = Host::default();
+    let (edit, cmd, read) = (
+        fake("write_file", ToolKind::Edit, "created"),
+        command_tool(0),
+        fake("read_file", ToolKind::Read, "body"),
+    );
+    let call = |id: &str, name: &str, args: Value| Part::ToolCall {
+        id: id.into(),
+        name: name.into(),
+        args,
+    };
+    // What the store holds after Patina stopped in the middle of step 1: the prompt and five calls, no results.
+    let mut h = vec![
+        Message::user("do it"),
+        Message {
+            role: Role::Assistant,
+            parts: vec![
+                call("c1", "write_file", json!({"path": "a"})),
+                call("c2", "run_command", json!({"command": "make"})),
+                call("c3", "write_file", json!({"path": "b"})),
+                call("c4", "write_file", json!({"path": "secret"})),
+                call("c5", "read_file", json!({"path": "c"})),
+            ],
+        },
+    ];
+    *host.saved.lock().unwrap() = h[1..].to_vec();
+    let states = vec![
+        // Its result was logged before the stop.
+        CallState::Finished {
+            content: "created a".into(),
+            is_error: false,
+        },
+        // It was running when Patina stopped.
+        CallState::Interrupted,
+        // The owner answered these two while the run was down.
+        CallState::Decided(ApprovalDecision::Approve),
+        CallState::Decided(ApprovalDecision::Deny("not that file".into())),
+        // The last one never started; `resume` may be shorter than the calls.
+    ];
+    let p = Scripted::new(vec![text("All done.")]);
+    let mut c = ctx(p.clone(), &host, vec![edit.clone(), cmd.clone(), read.clone()]);
+    c.budget = Arc::new(BudgetTracker::resume(
+        Budgets::default(),
+        crate::budget::Usage {
+            steps: 1,
+            ..Default::default()
+        },
+    ));
+    // No approval is requested: `decisions` is empty, so a request would panic.
+    assert_eq!(run_agent(&spec(), &c, &mut h, states).await, Outcome::Completed);
+    assert_eq!(h.len(), 4);
+    assert!(paired(&h));
+    assert_eq!(result_of(&h[2], 0), ("created a", false));
+    assert_eq!(result_of(&h[2], 1), (INTERRUPTED_CALL, true));
+    assert_eq!(result_of(&h[2], 2), ("created", false));
+    assert!(result_of(&h[2], 3).0.contains("Owner's note: not that file") && result_of(&h[2], 3).1);
+    assert_eq!(result_of(&h[2], 4), ("body", false));
+    // Only the approved edit and the read ran; the interrupted command was not repeated.
+    assert_eq!(*edit.seen.lock().unwrap(), [json!({"path": "b"})]);
+    assert!(cmd.seen.lock().unwrap().is_empty());
+    assert_eq!(read.seen.lock().unwrap().len(), 1);
+    // Calls that were logged before are not logged twice; the finished one gets no second result.
+    let logged = |kind: &str| -> Vec<String> { host.of(kind).iter().map(|e| e["id"].as_str().unwrap().to_string()).collect() };
+    assert_eq!(logged("tool_call"), ["c5"]);
+    assert_eq!(logged("tool_result"), ["c2", "c3", "c4", "c5"]);
+    // The approved edit is checkpointed under the step it belongs to, and the next turn is step 2.
+    assert_eq!(*host.checkpoints.lock().unwrap(), [(1, "created".to_string())]);
+    assert_eq!(c.budget.usage().steps, 2);
+    assert_eq!(p.requests.lock().unwrap()[0].messages.len(), 3);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_shutdown_leaves_the_turn_open_so_the_approval_can_be_answered_later() {
+    let host = Host {
+        hang: true,
+        ..Host::default()
+    };
+    let edit = fake("write_file", ToolKind::Edit, "created");
+    let p = Scripted::new(vec![calls(&[
+        ("c1", "write_file", json!({"path": "a"})),
+        ("c2", "write_file", json!({"path": "b"})),
+    ])]);
+    let c = ctx(p, &host, vec![edit.clone()]);
+    let (cancel, signals) = (c.cancel.clone(), c.signals.clone());
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        signals.shutdown.store(true, Ordering::SeqCst);
+        cancel.cancel();
+    });
+    let (out, h) = run(&c).await;
+    assert_eq!(out, Outcome::Interrupted);
+    // Unlike a Stop, nothing is written for the open calls: the request stays answerable.
+    assert_eq!(h.len(), 2);
+    assert!(host.of("tool_result").is_empty());
+    assert_eq!(host.asked.lock().unwrap().len(), 1);
+    assert_eq!(host.of("agent_finished")[0]["status"], "interrupted");
+}
+
+fn small_window(tokens: u32) -> AgentSpec {
+    AgentSpec {
+        context_window: tokens,
+        ..spec()
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn old_large_outputs_are_replaced_by_a_pointer_before_anything_is_summarized() {
+    let host = Host::default();
+    let output = "x".repeat(3000);
+    let read = fake("read_file", ToolKind::Read, &output);
+    let mut turns: Vec<Script> = (0..5)
+        .map(|i| calls(&[("c", "read_file", json!({"path": format!("file{i}")}))]))
+        .collect();
+    turns.push(text("Done."));
+    let p = Scripted::new(turns);
+    let c = ctx(p.clone(), &host, vec![read]);
+    // 5,000 tokens: compaction starts above 3,500. Each turn adds about 760, on top of about 250 fixed.
+    let mut h = vec![Message::user("do it")];
+    assert_eq!(run_agent(&small_window(5000), &c, &mut h, vec![]).await, Outcome::Completed);
+    let compactions = host.of("compaction");
+    assert_eq!(compactions.len(), 1, "{compactions:?}");
+    assert_eq!(compactions[0]["stage"], "outputs");
+    assert_eq!(compactions[0]["outputs_replaced"], 2);
+    assert!(compactions[0]["tokens_after"].as_u64().unwrap() < compactions[0]["tokens_before"].as_u64().unwrap());
+    // The two oldest outputs were saved whole and replaced; the latest three turns are untouched.
+    let artifacts = host.artifacts.lock().unwrap();
+    assert_eq!(artifacts.len(), 2);
+    assert!(artifacts.iter().all(|a| a.1 == output));
+    let last = &p.requests.lock().unwrap()[5];
+    assert_eq!(last.messages.len(), 11, "no message was dropped");
+    for (i, m) in [2usize, 4].iter().enumerate() {
+        let (content, _) = result_of(&last.messages[*m], 0);
+        assert!(
+            content.contains("Patina removed this output") && content.contains(&artifacts[i].0),
+            "{content}"
+        );
+    }
+    for m in [6, 8, 10] {
+        assert_eq!(result_of(&last.messages[m], 0).0, output);
+    }
+    assert!(paired(&last.messages));
+    // The stored context matches what the agent now works from.
+    assert_eq!(as_json(&host.saved.lock().unwrap()), as_json(&h[1..]));
+    assert_eq!(*host.replaced.lock().unwrap(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_oldest_turns_are_summarized_by_the_same_model_when_that_is_not_enough() {
+    let host = Host::default();
+    let read = fake("read_file", ToolKind::Read, &"x".repeat(3000));
+    let p = Scripted::new(vec![
+        calls(&[("c1", "read_file", json!({"path": "file0"}))]),
+        calls(&[("c2", "read_file", json!({"path": "file1"}))]),
+        // The request for the summary comes before the third turn.
+        text("The agent read file0 and found nothing of interest."),
+        text("Done."),
+    ]);
+    let c = ctx(p.clone(), &host, vec![read]);
+    // 2,000 tokens: compaction starts above 1,400, which two turns pass.
+    let mut h = vec![Message::user("do it")];
+    assert_eq!(run_agent(&small_window(2000), &c, &mut h, vec![]).await, Outcome::Completed);
+    let requests = p.requests.lock().unwrap();
+    assert_eq!(requests.len(), 4);
+    // The summary request: the summarizer's own system prompt, no tools, the old turn as plain text.
+    let ask = &requests[2];
+    assert_eq!(ask.system.as_deref(), Some(compact::SUMMARY_SYSTEM));
+    assert!(ask.tools.is_empty() && ask.messages.len() == 1);
+    assert!(
+        matches!(&ask.messages[0].parts[..], [Part::Text(t)] if t.starts_with("AGENT CALLED read_file {\"path\":\"file0\"}\nTOOL RESULT: xxx") && t.ends_with(compact::SUMMARY_ASK))
+    );
+    // The turn after it: the prompt word for word, the summary, and the latest turn unchanged.
+    let next = &requests[3].messages;
+    assert_eq!(next.len(), 3);
+    assert!(
+        matches!(&next[0].parts[..], [Part::Text(a), Part::Text(b)] if a == "do it" && b.ends_with("The agent read file0 and found nothing of interest."))
+    );
+    assert!(matches!(&next[1].parts[..], [Part::ToolCall { id, .. }] if id == "c2"));
+    assert_eq!(result_of(&next[2], 0).0.len(), 3000);
+    assert!(paired(next));
+    let done = host.of("compaction");
+    assert_eq!(done.len(), 1, "{done:?}");
+    assert_eq!(
+        (&done[0]["stage"], &done[0]["turns_summarized"], &done[0]["turns_kept"]),
+        (&json!("summary"), &json!(1), &json!(1))
+    );
+    assert_eq!(done[0]["summary"], "The agent read file0 and found nothing of interest.");
+    // The summary costs tokens, which count, and is not a step.
+    let usage = host.of("usage");
+    assert_eq!(usage.len(), 4);
+    assert_eq!(usage.iter().filter(|u| u["compaction"] == true).count(), 1);
+    assert_eq!(c.budget.usage().steps, 3);
+    assert_eq!(c.budget.usage().input_tokens + c.budget.usage().output_tokens, 60);
+    assert_eq!(as_json(&host.saved.lock().unwrap()), as_json(&h[1..]));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_summary_that_cannot_be_made_is_logged_and_the_run_goes_on() {
+    let host = Host::default();
+    let read = fake("read_file", ToolKind::Read, &"x".repeat(3000));
+    let p = Scripted::new(vec![
+        calls(&[("c1", "read_file", json!({"path": "file0"}))]),
+        calls(&[("c2", "read_file", json!({"path": "file1"}))]),
+        vec![Err(ProviderError::Fatal("no such model".into()))],
+        text("Done."),
+    ]);
+    let c = ctx(p.clone(), &host, vec![read]);
+    let mut h = vec![Message::user("do it")];
+    assert_eq!(run_agent(&small_window(2000), &c, &mut h, vec![]).await, Outcome::Completed);
+    assert!(host.of("compaction").is_empty());
+    let errors = host.of("error");
+    assert_eq!(errors.len(), 1);
+    assert!(
+        errors[0]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("The history could not be shortened")
+    );
+    assert_eq!((&errors[0]["retrying"], &errors[0]["compaction"]), (&json!(false), &json!(true)));
+    assert_eq!(p.requests.lock().unwrap()[3].messages.len(), 5, "the history is as it was");
+}
+
+/// A model that reads one new file per turn for a while, and writes a summary whenever it is asked for one.
+struct Reader {
+    turns: usize,
+    served: Mutex<usize>,
+    summaries: Mutex<usize>,
+    /// The largest request seen, in characters, and whether every request kept calls and results together.
+    largest: Mutex<usize>,
+    always_paired: Mutex<bool>,
+}
+
+#[async_trait]
+impl ChatProvider for Reader {
+    async fn stream(
+        &self,
+        req: ChatRequest,
+        _: CancellationToken,
+    ) -> Result<futures::stream::BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
+        if req.system.as_deref() == Some(compact::SUMMARY_SYSTEM) {
+            let mut n = self.summaries.lock().unwrap();
+            *n += 1;
+            return Ok(futures::stream::iter(text(&format!("Summary {n}: files were read, nothing found yet."))).boxed());
+        }
+        let chars: usize = req.messages.iter().map(compact::message_chars).sum();
+        let mut largest = self.largest.lock().unwrap();
+        *largest = (*largest).max(chars);
+        *self.always_paired.lock().unwrap() &= paired(&req.messages)
+            && matches!(req.messages[0].parts.first(), Some(Part::Text(t)) if t == "do it")
+            && req.messages.last().unwrap().role == Role::User;
+        let mut served = self.served.lock().unwrap();
+        *served += 1;
+        let turn = if *served > self.turns {
+            text("Done.")
+        } else {
+            // It also thinks aloud at length, so replacing old outputs is not enough for long.
+            let mut turn = calls(&[("c", "read_file", json!({"path": format!("file{served}")}))]);
+            turn.insert(0, Ok(StreamEvent::TextDelta("Let me look at the next file. ".repeat(50))));
+            turn
+        };
+        Ok(futures::stream::iter(turn).boxed())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_long_run_stays_inside_the_context_window() {
+    let host = Host::default();
+    let read = fake("read_file", ToolKind::Read, &"x".repeat(3000));
+    let model = Arc::new(Reader {
+        turns: 60,
+        served: Mutex::default(),
+        summaries: Mutex::default(),
+        largest: Mutex::default(),
+        always_paired: Mutex::new(true),
+    });
+    let mut c = ctx(Scripted::new(vec![]), &host, vec![read]);
+    c.provider = model.clone();
+    c.budget = Arc::new(BudgetTracker::new(Budgets {
+        max_steps: 100,
+        ..Budgets::default()
+    }));
+    // 8,000 tokens hold about ten of these turns; the run makes sixty.
+    let mut h = vec![Message::user("do it")];
+    assert_eq!(run_agent(&small_window(8000), &c, &mut h, vec![]).await, Outcome::Completed);
+    assert_eq!(c.budget.usage().steps, 61);
+    assert!(*model.always_paired.lock().unwrap());
+    // No request was larger than the window; 32,000 characters are 8,000 tokens.
+    let largest = *model.largest.lock().unwrap();
+    assert!(largest < 32_000, "{largest}");
+    let stages: Vec<String> = host
+        .of("compaction")
+        .iter()
+        .map(|e| e["stage"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        stages.iter().any(|s| s == "outputs") && stages.iter().any(|s| s == "summary"),
+        "{stages:?}"
+    );
+    assert!(*model.summaries.lock().unwrap() >= 1);
+    assert!(host.of("error").is_empty());
+    assert_eq!(as_json(&host.saved.lock().unwrap()), as_json(&h[1..]));
 }

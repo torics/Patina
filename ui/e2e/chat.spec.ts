@@ -1,6 +1,7 @@
 // Smoke tests against the real binary: set up, add a provider and agent, chat, reload and replay; run an agent in
 // a project, approve its edit after reading the diff, and merge the result; then let an agent run a command in
-// the sandbox and put the command on the project's allowlist.
+// the sandbox and put the command on the project's allowlist; and pause an agent that repeats itself, resume it,
+// and send it a message.
 import { expect, test } from "@playwright/test";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -48,6 +49,18 @@ test.beforeAll(async () => {
         } else {
           const args = JSON.stringify({ command: "echo tests passed" });
           res.write(chunk({ tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "run_command", arguments: args } }] }, null));
+          res.end(chunk({}, "tool_calls", usage) + "data: [DONE]\n\n");
+        }
+        return;
+      }
+      if (body.tools?.length && JSON.stringify(messages).includes("Keep reading")) {
+        // An agent that repeats itself until the owner tells it to stop.
+        if (JSON.stringify(messages.at(-1)).includes("Stop reading")) {
+          res.write(chunk({ content: "I stopped reading." }, null));
+          res.end(chunk({}, "stop", usage) + "data: [DONE]\n\n");
+        } else {
+          const args = JSON.stringify({ path: "README.md" });
+          res.write(chunk({ tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "read_file", arguments: args } }] }, null));
           res.end(chunk({}, "tool_calls", usage) + "data: [DONE]\n\n");
         }
         return;
@@ -276,4 +289,41 @@ test("a command runs in the sandbox, and approving it can put it on the allowlis
   await page.getByLabel("Copy .env anyway").check();
   await page.getByRole("button", { name: "Save settings" }).click();
   await expect(page.getByText("Saved.")).toBeVisible();
+});
+
+test("an agent that repeats itself is paused, and a message sends it on", async ({ page }) => {
+  await page.goto(base);
+  await page.getByLabel("Password", { exact: true }).fill("a long enough password");
+  await page.getByRole("button", { name: "Sign in" }).click();
+  if (await page.getByRole("button", { name: "New chat" }).count()) await page.getByRole("button", { name: "New chat" }).click();
+  await page.getByLabel("Project").selectOption("repo");
+  await page.getByLabel("Prompt", { exact: true }).fill("Keep reading the readme");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  // The same read three times in a row pauses the run.
+  await expect(page.locator(".status")).toHaveText("paused");
+  await expect(page.locator(".note.warn")).toContainText("same read_file call 3 times in a row");
+  await expect(page.getByRole("button", { name: "Stop" })).toHaveCount(0);
+
+  // Resuming as it is lets it go on, until it repeats itself again.
+  await page.getByRole("button", { name: "Resume", exact: true }).click();
+  await expect(page.locator(".note.warn")).toHaveCount(2);
+  await expect(page.locator(".status")).toHaveText("paused");
+  await expect(page.locator(".note", { hasText: "Resumed." })).toHaveCount(1);
+
+  // A message resumes it, and the agent reads it before its next turn.
+  await page.getByLabel(/^Message the agent/).fill("Stop reading; the file will not change.");
+  await page.getByRole("button", { name: "Send and resume" }).click();
+  await expect(page.locator(".status")).toHaveText("completed");
+  await expect(page.locator(".bubble.user.steer")).toContainText("Stop reading; the file will not change.");
+  await expect(page.locator(".bubble.agent .text").last()).toHaveText("I stopped reading.");
+  // Everything happened in one block: the agent picked up where it was. (The other block prepared the worktree.)
+  await expect(page.locator(".bubble.agent:not([aria-label='Preparing the worktree'])")).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Resume", exact: true })).toHaveCount(0);
+
+  // A reload replays the same timeline.
+  await page.reload();
+  await expect(page.locator(".bubble.user.steer")).toHaveCount(1);
+  await expect(page.locator(".note.warn")).toHaveCount(2);
+  await expect(page.locator(".bubble.agent .text").last()).toHaveText("I stopped reading.");
 });

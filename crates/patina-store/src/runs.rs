@@ -20,6 +20,10 @@ pub struct RunRow {
     pub disposition: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// The process that is driving the run, as `patina-tools` identifies processes. `None` when nobody is.
+    pub owner: Option<String>,
+    /// When retention removed the run's log and context.
+    pub pruned_at: Option<i64>,
 }
 
 fn run_from_row(r: &rusqlite::Row) -> rusqlite::Result<RunRow> {
@@ -38,10 +42,12 @@ fn run_from_row(r: &rusqlite::Row) -> rusqlite::Result<RunRow> {
         disposition: r.get(10)?,
         created_at: r.get(11)?,
         updated_at: r.get(12)?,
+        owner: r.get(13)?,
+        pruned_at: r.get(14)?,
     })
 }
 
-const RUN_COLS: &str = "id, project_id, team_id, prompt, status, budgets_json, usage_json, worktree_path, branch, base_commit, disposition, created_at, updated_at";
+const RUN_COLS: &str = "id, project_id, team_id, prompt, status, budgets_json, usage_json, worktree_path, branch, base_commit, disposition, created_at, updated_at, owner, pruned_at";
 
 pub async fn create_run(db: &Db, id: &str, project_id: &str, team_id: &str, prompt: &str, budgets: &Value) -> Result<(), StoreError> {
     let (id, project_id, team_id, prompt, budgets) = (
@@ -304,6 +310,159 @@ pub async fn load_messages(db: &Db, run_id: &str, agent_id: &str) -> Result<Vec<
     .await
 }
 
+/// Record which process drives the run, or that none does.
+pub async fn set_owner(db: &Db, id: &str, owner: Option<&str>) -> Result<(), StoreError> {
+    let (id, owner) = (id.to_string(), owner.map(str::to_string));
+    db.call(move |c| {
+        c.execute("UPDATE runs SET owner = ?2 WHERE id = ?1", params![id, owner])?;
+        Ok(())
+    })
+    .await
+}
+
+/// Runs that some process was working on, or that wait for an approval: what a restart has to look at.
+pub async fn unfinished_runs(db: &Db) -> Result<Vec<RunRow>, StoreError> {
+    db.call(move |c| {
+        let mut s = c.prepare(&format!(
+            "SELECT {RUN_COLS} FROM runs WHERE status IN ('queued', 'running', 'waiting_approval') ORDER BY id"
+        ))?;
+        let rows = s.query_map([], run_from_row)?.collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    })
+    .await
+}
+
+/// Sequence number of the agent's latest event of one type.
+pub async fn last_seq_of(db: &Db, run_id: &str, agent_id: &str, kind: &str) -> Result<Option<i64>, StoreError> {
+    let (run_id, agent_id, kind) = (run_id.to_string(), agent_id.to_string(), kind.to_string());
+    db.call(move |c| {
+        Ok(c.query_row(
+            "SELECT MAX(seq) FROM events WHERE run_id = ?1 AND agent_id = ?2 AND type = ?3",
+            params![run_id, agent_id, kind],
+            |r| r.get(0),
+        )?)
+    })
+    .await
+}
+
+/// Replace an agent's stored context, after a compaction. One transaction: a crash leaves the old or the new.
+pub async fn replace_messages(db: &Db, run_id: &str, agent_id: &str, messages: &[Message]) -> Result<(), StoreError> {
+    let (run_id, agent_id) = (run_id.to_string(), agent_id.to_string());
+    let mut rows = Vec::with_capacity(messages.len());
+    for m in messages {
+        let role = serde_json::to_value(m.role)
+            .map_err(|e| StoreError::Other(e.to_string()))?
+            .as_str()
+            .unwrap_or("user")
+            .to_string();
+        rows.push((role, serde_json::to_string(&m.parts).map_err(|e| StoreError::Other(e.to_string()))?));
+    }
+    db.call(move |c| {
+        let tx = c.transaction()?;
+        tx.execute(
+            "DELETE FROM messages WHERE run_id = ?1 AND agent_id = ?2",
+            params![run_id, agent_id],
+        )?;
+        for (idx, (role, parts)) in rows.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO messages(run_id, agent_id, idx, role, parts_json) VALUES(?1, ?2, ?3, ?4, ?5)",
+                params![run_id, agent_id, idx as i64, role, parts],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    })
+    .await
+}
+
+/// The run's latest sequence number, 0 for an empty log.
+pub async fn last_seq(db: &Db, run_id: &str) -> Result<i64, StoreError> {
+    let run_id = run_id.to_string();
+    db.call(move |c| Ok(c.query_row("SELECT COALESCE(MAX(seq), 0) FROM events WHERE run_id = ?1", [run_id], |r| r.get(0))?))
+        .await
+}
+
+/// Take back a message that could not be delivered.
+pub async fn delete_steering(db: &Db, id: &str) -> Result<(), StoreError> {
+    let id = id.to_string();
+    db.call(move |c| {
+        c.execute("DELETE FROM steering WHERE id = ?1 AND delivered_at IS NULL", [id])?;
+        Ok(())
+    })
+    .await
+}
+
+/// Queue a message from the owner for the run's agent.
+pub async fn add_steering(db: &Db, id: &str, run_id: &str, text: &str) -> Result<(), StoreError> {
+    let (id, run_id, text) = (id.to_string(), run_id.to_string(), text.to_string());
+    db.call(move |c| {
+        c.execute(
+            "INSERT INTO steering(id, run_id, text, created_at) VALUES(?1, ?2, ?3, ?4)",
+            params![id, run_id, text, now_ms()],
+        )?;
+        Ok(())
+    })
+    .await
+}
+
+/// Hand out the owner's waiting messages, oldest first. Each is handed out once.
+pub async fn take_steering(db: &Db, run_id: &str) -> Result<Vec<String>, StoreError> {
+    let run_id = run_id.to_string();
+    db.call(move |c| {
+        let tx = c.transaction()?;
+        let texts = {
+            let mut s = tx.prepare("SELECT text FROM steering WHERE run_id = ?1 AND delivered_at IS NULL ORDER BY id")?;
+            s.query_map([&run_id], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?
+        };
+        tx.execute(
+            "UPDATE steering SET delivered_at = ?2 WHERE run_id = ?1 AND delivered_at IS NULL",
+            params![run_id, now_ms()],
+        )?;
+        tx.commit()?;
+        Ok(texts)
+    })
+    .await
+}
+
+/// How many of the owner's messages still wait for the agent.
+pub async fn waiting_steering(db: &Db, run_id: &str) -> Result<i64, StoreError> {
+    let run_id = run_id.to_string();
+    db.call(move |c| {
+        Ok(c.query_row(
+            "SELECT COUNT(*) FROM steering WHERE run_id = ?1 AND delivered_at IS NULL",
+            [run_id],
+            |r| r.get(0),
+        )?)
+    })
+    .await
+}
+
+/// Retention: remove the event log, the agents' contexts, answered approvals and delivered messages of runs
+/// that ended before `cutoff` (Unix milliseconds). The run rows and their checkpoints stay. Runs that are
+/// active, paused or waiting are never touched. Returns the ids of the runs that were pruned.
+pub async fn prune_before(db: &Db, cutoff: i64) -> Result<Vec<String>, StoreError> {
+    db.call(move |c| {
+        let tx = c.transaction()?;
+        let ids = {
+            let mut s = tx.prepare(
+                "SELECT id FROM runs WHERE pruned_at IS NULL AND updated_at < ?1
+                 AND status IN ('completed', 'failed', 'cancelled', 'interrupted', 'budget_exceeded') ORDER BY id",
+            )?;
+            s.query_map([cutoff], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?
+        };
+        for id in &ids {
+            for table in ["events", "messages", "approvals", "steering"] {
+                tx.execute(&format!("DELETE FROM {table} WHERE run_id = ?1"), [id])?;
+            }
+            // `updated_at` stays: it says when the run ended.
+            tx.execute("UPDATE runs SET pruned_at = ?2 WHERE id = ?1", params![id, now_ms()])?;
+        }
+        tx.commit()?;
+        Ok(ids)
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,5 +561,104 @@ mod tests {
         assert_eq!(m.len(), 2);
         assert_eq!(message_count(&db, "r1", "a").await.unwrap(), 2);
         assert!(matches!(&m[1].parts[0], patina_core::provider::Part::Text(t) if t == "hi"));
+    }
+
+    #[tokio::test]
+    async fn a_compacted_context_replaces_the_stored_one() {
+        let (_t, db) = db().await;
+        create_run(&db, "r1", "", "agent:a", "hi", &json!({})).await.unwrap();
+        for (i, text) in ["one", "two", "three"].iter().enumerate() {
+            save_message(&db, "r1", "a", i as i64, &Message::user(*text)).await.unwrap();
+        }
+        save_message(&db, "r1", "b", 0, &Message::user("other agent")).await.unwrap();
+        replace_messages(&db, "r1", "a", &[Message::user("one"), Message::assistant("summary")])
+            .await
+            .unwrap();
+        let now = load_messages(&db, "r1", "a").await.unwrap();
+        assert_eq!(
+            serde_json::to_value(&now).unwrap(),
+            json!([{"role": "user", "parts": [{"text": "one"}]}, {"role": "assistant", "parts": [{"text": "summary"}]}])
+        );
+        assert_eq!(message_count(&db, "r1", "a").await.unwrap(), 2);
+        assert_eq!(load_messages(&db, "r1", "b").await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_owners_messages_are_handed_out_once_in_order() {
+        let (_t, db) = db().await;
+        create_run(&db, "r1", "", "agent:a", "hi", &json!({})).await.unwrap();
+        create_run(&db, "r2", "", "agent:a", "hi", &json!({})).await.unwrap();
+        add_steering(&db, "m1", "r1", "first").await.unwrap();
+        add_steering(&db, "m2", "r1", "second").await.unwrap();
+        add_steering(&db, "m3", "r2", "elsewhere").await.unwrap();
+        assert_eq!(waiting_steering(&db, "r1").await.unwrap(), 2);
+        assert_eq!(take_steering(&db, "r1").await.unwrap(), ["first", "second"]);
+        assert!(take_steering(&db, "r1").await.unwrap().is_empty());
+        assert_eq!(waiting_steering(&db, "r1").await.unwrap(), 0);
+        assert_eq!(take_steering(&db, "r2").await.unwrap(), ["elsewhere"]);
+    }
+
+    #[tokio::test]
+    async fn retention_prunes_only_runs_that_ended_long_ago() {
+        let (_t, db) = db().await;
+        for (id, status) in [
+            ("old", "completed"),
+            ("paused", "paused"),
+            ("waiting", "waiting_approval"),
+            ("new", "failed"),
+        ] {
+            create_run(&db, id, "", "agent:a", "hi", &json!({})).await.unwrap();
+            append_event(&db, id, Some("a"), "text", json!({"text": "x"})).await.unwrap();
+            save_message(&db, id, "a", 0, &Message::user("hi")).await.unwrap();
+            add_checkpoint(&db, id, 1, "abc", "created a").await.unwrap();
+            set_status(&db, id, status).await.unwrap();
+        }
+        let long_ago = now_ms() - 40 * 86_400_000;
+        db.call(move |c| {
+            c.execute("UPDATE runs SET updated_at = ?1 WHERE id != 'new'", [long_ago])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let cutoff = now_ms() - 30 * 86_400_000;
+        assert_eq!(prune_before(&db, cutoff).await.unwrap(), ["old"]);
+        assert!(events_after(&db, "old", 0, 10).await.unwrap().is_empty());
+        assert!(load_messages(&db, "old", "a").await.unwrap().is_empty());
+        let old = get_run(&db, "old").await.unwrap().unwrap();
+        assert!(old.pruned_at.is_some() && old.updated_at == long_ago && old.prompt == "hi");
+        assert_eq!(list_checkpoints(&db, "old").await.unwrap().len(), 1);
+        // Paused and waiting runs keep everything however old they are; so does a run that ended recently.
+        for id in ["paused", "waiting", "new"] {
+            assert_eq!(events_after(&db, id, 0, 10).await.unwrap().len(), 1, "{id}");
+            assert!(get_run(&db, id).await.unwrap().unwrap().pruned_at.is_none());
+        }
+        // A second pass finds nothing new.
+        assert!(prune_before(&db, cutoff).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_restart_finds_the_runs_that_were_in_progress() {
+        let (_t, db) = db().await;
+        for (id, status) in [
+            ("a", "running"),
+            ("b", "completed"),
+            ("c", "waiting_approval"),
+            ("d", "queued"),
+            ("e", "paused"),
+        ] {
+            create_run(&db, id, "", "agent:a", "hi", &json!({})).await.unwrap();
+            set_status(&db, id, status).await.unwrap();
+        }
+        set_owner(&db, "a", Some("123:456")).await.unwrap();
+        let found = unfinished_runs(&db).await.unwrap();
+        assert_eq!(found.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["a", "c", "d"]);
+        assert_eq!(found[0].owner.as_deref(), Some("123:456"));
+        set_owner(&db, "a", None).await.unwrap();
+        assert_eq!(get_run(&db, "a").await.unwrap().unwrap().owner, None);
+        append_event(&db, "a", Some("x"), "usage", json!({})).await.unwrap();
+        append_event(&db, "a", Some("x"), "text", json!({})).await.unwrap();
+        append_event(&db, "a", Some("y"), "usage", json!({})).await.unwrap();
+        assert_eq!(last_seq_of(&db, "a", "x", "usage").await.unwrap(), Some(1));
+        assert_eq!(last_seq_of(&db, "a", "x", "checkpoint").await.unwrap(), None);
     }
 }

@@ -24,4 +24,5 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 tokio = { workspace = true, features = ["io-util", "process"] }

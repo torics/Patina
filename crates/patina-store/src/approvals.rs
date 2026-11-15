@@ -82,6 +82,40 @@ pub async fn resolve(db: &Db, id: &str, status: &str, decision: &Value) -> Resul
     .await
 }
 
+/// Every approval of a run, oldest first.
+pub async fn for_run(db: &Db, run_id: &str) -> Result<Vec<ApprovalRow>, StoreError> {
+    let run_id = run_id.to_string();
+    db.call(move |c| {
+        let mut s = c.prepare(&format!("SELECT {COLS} FROM approvals WHERE run_id = ?1 ORDER BY seq, id"))?;
+        let rows = s.query_map([run_id], from_row)?.collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    })
+    .await
+}
+
+/// Rewrite the stored answer of an approval, to note that it was acted on.
+pub async fn set_decision(db: &Db, id: &str, decision: &Value) -> Result<(), StoreError> {
+    let (id, decision) = (id.to_string(), decision.to_string());
+    db.call(move |c| {
+        c.execute("UPDATE approvals SET decision_json = ?2 WHERE id = ?1", params![id, decision])?;
+        Ok(())
+    })
+    .await
+}
+
+/// Mark one approval that was never acted on as no longer answerable. It is asked again.
+pub async fn expire_for_call(db: &Db, id: &str) -> Result<(), StoreError> {
+    let id = id.to_string();
+    db.call(move |c| {
+        c.execute(
+            "UPDATE approvals SET status = 'expired', decided_at = COALESCE(decided_at, ?2) WHERE id = ?1",
+            params![id, now_ms()],
+        )?;
+        Ok(())
+    })
+    .await
+}
+
 /// Mark every pending approval of a run as no longer answerable (the run ended or was cancelled).
 pub async fn expire_for_run(db: &Db, run_id: &str) -> Result<(), StoreError> {
     let run_id = run_id.to_string();

@@ -14,4 +14,13 @@ has_worktree: boolean,
 /**
  * What happened to the changes: `merged`, `kept`, `discarded`, or null while undecided.
  */
-disposition: string | null, created_at: number, updated_at: number, };
+disposition: string | null, created_at: number, updated_at: number, 
+/**
+ * True when the run is paused, interrupted, failed, stopped by a budget or waiting after a restart, and
+ * nothing prevents resuming it.
+ */
+can_resume: boolean, 
+/**
+ * True once the retention setting removed the run's log.
+ */
+pruned: boolean, };

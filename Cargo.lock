@@ -1652,6 +1652,7 @@ dependencies = [
  "patina-server",
  "patina-store",
  "patina-tools",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",

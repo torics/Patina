@@ -7,7 +7,7 @@ import type { ProviderView } from "./api/generated/ProviderView";
 import type { RunView } from "./api/generated/RunView";
 import type { SandboxStatus } from "./api/generated/SandboxStatus";
 import { api, ApiError } from "./api";
-import { applyDelta, applyEvent, emptyTimeline, isTerminal, type Timeline } from "./reducer";
+import { applyDelta, applyEvent, emptyTimeline, isActive, type Timeline } from "./reducer";
 
 export type Screen = "loading" | "setup" | "login" | "app";
 export const screen = signal<Screen>("loading");
@@ -19,6 +19,8 @@ export const projects = signal<ProjectView[]>([]);
 export const toolNames = signal<string[]>([]);
 /** What the daemon's host can contain commands with, as it was detected. */
 export const sandbox = signal<SandboxStatus | null>(null);
+/** Days after which the logs of finished runs are removed; 0 keeps them. */
+export const retentionDays = signal(0);
 export const runs = signal<RunView[]>([]);
 export const selectedRun = signal<string | null>(null);
 export const timeline = signal<Timeline>(emptyTimeline());
@@ -55,7 +57,7 @@ export async function enter() {
 
 export async function refresh() {
   const [p, a, r, pr, sys] = await Promise.all([api.providers(), api.agents(), api.runs(), api.projects(), api.system()]);
-  [providers.value, agents.value, runs.value, projects.value, toolNames.value, sandbox.value] = [p, a, r, pr, sys.tools, sys.sandbox];
+  [providers.value, agents.value, runs.value, projects.value, toolNames.value, sandbox.value, retentionDays.value] = [p, a, r, pr, sys.tools, sys.sandbox, sys.retention_days];
 }
 
 let source: EventSource | null = null;
@@ -101,10 +103,10 @@ function connect(id: string, retryMs: number) {
     timeline.value = applyDelta(timeline.value, d.agent_id, d.text);
   });
   es.onerror = () => {
-    // The server ends the stream once the run is over and its log is sent. Otherwise reattach from the last
-    // event seen, waiting longer each time while nothing arrives.
+    // The server ends the stream once the run is no longer working and its log is sent. While it is working or
+    // waiting, reattach from the last event seen, waiting longer each time while nothing arrives.
     es.close();
-    if (selectedRun.value !== id || isTerminal(timeline.value.status)) return;
+    if (selectedRun.value !== id || !isActive(timeline.value.status)) return;
     setTimeout(() => selectedRun.value === id && source === es && connect(id, Math.min(wait * 2, 15000)), wait);
   };
 }
@@ -114,6 +116,13 @@ export function closeRun() {
   selectedRun.value = null;
   timeline.value = emptyTimeline();
   history.replaceState(null, "", "#");
+}
+
+/** Resume a run, or send it a message (which resumes it if it is paused), then follow it live again. */
+export async function continueRun(id: string, message: string | null) {
+  const run = message === null ? await api.resumeRun(id) : await api.sendMessage(id, message);
+  runs.value = runs.value.map((r) => (r.id === id ? run : r));
+  catchUp(id);
 }
 
 export async function startRun(agentId: string, prompt: string, projectId: string | null, budgets: Budgets | null) {

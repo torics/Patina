@@ -5,6 +5,7 @@ pub mod agent;
 pub mod agent_config;
 pub mod api;
 pub mod budget;
+pub mod compact;
 pub mod config;
 pub mod events;
 pub mod paths;

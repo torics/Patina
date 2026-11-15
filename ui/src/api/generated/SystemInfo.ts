@@ -9,4 +9,8 @@ sandbox: SandboxStatus,
 /**
  * Names of the tools an agent can be given.
  */
-tools: Array<string>, };
+tools: Array<string>, 
+/**
+ * Logs of runs that ended more than this many days ago are removed. 0 keeps them. Set in `config.toml`.
+ */
+retention_days: number, };

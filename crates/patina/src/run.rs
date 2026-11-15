@@ -31,6 +31,7 @@ pub struct RunArgs {
 pub const EXIT_FAILED: u8 = 1;
 pub const EXIT_NEEDS_APPROVAL: u8 = 3;
 pub const EXIT_BUDGET: u8 = 4;
+pub const EXIT_PAUSED: u8 = 5;
 pub const EXIT_CANCELLED: u8 = 130;
 
 fn api(e: ApiError) -> anyhow::Error {
@@ -127,6 +128,19 @@ impl Printer {
             "approval_resolved" => writeln!(out, "[approval] {}", s("action"))?,
             "checkpoint" => writeln!(out, "[checkpoint] step {}, {}", p["step"], s("summary"))?,
             "rollback" => writeln!(out, "[rollback] to step {}", p["step"])?,
+            "user_message" => writeln!(out, "[owner] {}", one_line(&p["text"], 200))?,
+            "compaction" => match s("stage") {
+                "summary" => writeln!(
+                    out,
+                    "[compaction] summarized {} turns, kept {}: about {} tokens, down from {}",
+                    p["turns_summarized"], p["turns_kept"], p["tokens_after"], p["tokens_before"]
+                )?,
+                _ => writeln!(
+                    out,
+                    "[compaction] replaced {} old outputs: about {} tokens, down from {}",
+                    p["outputs_replaced"], p["tokens_after"], p["tokens_before"]
+                )?,
+            },
             "error" => {
                 let retry = if p["retrying"].as_bool().unwrap_or(false) {
                     " (retrying)"
@@ -358,6 +372,10 @@ pub async fn run(paths: Paths, args: RunArgs) -> Result<u8> {
         "completed" => 0,
         "cancelled" => EXIT_CANCELLED,
         "budget_exceeded" => EXIT_BUDGET,
+        "paused" => {
+            eprintln!("The run is paused. Resume it in the Patina web UI, or start a new run.");
+            EXIT_PAUSED
+        }
         _ => EXIT_FAILED,
     })
 }

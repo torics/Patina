@@ -10,7 +10,7 @@ Files live in the config folder (`~/.config/patina/` on Linux, or `--config-dir`
 | `port` | `7878` | App port |
 | `preview_port` | `7879` | Preview proxy port (used from M6) |
 | `allowed_hosts` | `["localhost", "127.0.0.1", "[::1]"]` | Accepted `Host` names |
-| `retention_days` | `0` | Prune runs older than this; 0 keeps all (used from M4) |
+| `retention_days` | `0` | Remove the event log, agent context and saved outputs of runs that ended more than this many days ago, at start and every six hours. The run, its branch and its checkpoints stay; a pruned run cannot be resumed. Paused and waiting runs are never pruned. 0 keeps everything |
 
 ## providers.toml
 
@@ -43,7 +43,7 @@ model = "some-model-id"
 system_prompt = ""
 temperature = 0.2          # optional
 max_output_tokens = 8000   # optional
-context_window = 128000
+context_window = 128000    # tokens; history is compacted before it passes 70% of this
 tools = ["list_files", "read_file", "search", "edit_file", "write_file", "run_command"]
 can_delegate_to = []
 ```

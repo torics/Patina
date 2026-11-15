@@ -52,6 +52,12 @@ const MIGRATIONS: &[&str] = &[
     // 3: what happened to a run's changes (merged, kept, discarded); approvals remember when they were asked
     "ALTER TABLE runs ADD COLUMN disposition TEXT;
      ALTER TABLE approvals ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0;",
+    // 4: which process drives a run, when its log was pruned, and the owner's messages to a run
+    "ALTER TABLE runs ADD COLUMN owner TEXT;
+     ALTER TABLE runs ADD COLUMN pruned_at INTEGER;
+     CREATE TABLE steering(
+        id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+        text TEXT NOT NULL, created_at INTEGER NOT NULL, delivered_at INTEGER);",
 ];
 
 type Job = Box<dyn FnOnce(&mut Connection) + Send>;

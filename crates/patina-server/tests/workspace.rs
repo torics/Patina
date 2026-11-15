@@ -226,13 +226,12 @@ async fn rollback_restores_a_checkpoint_and_discard_removes_worktree_and_branch(
     assert!(wt.join("first.txt").exists() && !wt.join("second.txt").exists());
     let diff = get_json(&d, &format!("/runs/{run}/diff")).await;
     assert_eq!(diff["files"], json!([{"status": "A", "path": "first.txt"}]));
-    // The rollback is in the log, after the end of the run, and the agent's history carries a note.
+    // The rollback is in the log, after the end of the run, and a note waits for the agent's next turn.
     let (ids, events, _) = d.events(&run, "", None).await;
     assert_eq!(ids, (1..=ids.len() as i64).collect::<Vec<_>>());
     assert_eq!(events.last().unwrap()["type"], "rollback");
     assert_eq!(events.last().unwrap()["payload"]["step"], 1);
-    let messages = patina_store::runs::load_messages(&d.state.db, &run, "a1").await.unwrap();
-    assert!(format!("{:?}", messages.last().unwrap()).contains("rolled the workspace back"));
+    assert_eq!(patina_store::runs::waiting_steering(&d.state.db, &run).await.unwrap(), 1);
 
     // Step 0 is the starting point.
     assert_eq!(d.post(&format!("/runs/{run}/rollback"), json!({"step": 0})).await.0, 200);
@@ -296,7 +295,8 @@ async fn keeping_the_branch_removes_only_the_worktree_and_merge_needs_a_clean_ch
 #[tokio::test]
 async fn a_budget_stops_a_run_and_can_be_raised() {
     let looping: Vec<Script> = (0..10)
-        .map(|i| Script::tool_calls(&[(&format!("c{i}"), "list_files", json!({"path": "."}))]))
+        // Alternating arguments, so the loop breaker does not stop it first.
+        .map(|i| Script::tool_calls(&[(&format!("c{i}"), "list_files", json!({"path": if i % 2 == 0 { "." } else { "./" }}))]))
         .collect();
     let (d, _repo) = workbench(looping, &ALL_TOOLS).await;
     let run = start_run(&d, json!({"budgets": {"max_steps": 3}})).await;

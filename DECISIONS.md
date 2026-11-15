@@ -100,12 +100,34 @@
 - tracing and tokio-util in `patina-tools`, serde in the `patina` crate: already in the workspace.
 - Test only: Docker or Podman with `alpine:3` for the container test; a Rust toolchain for the build-and-test run.
 
+## M4 choices
+- **A run records the process that drives it** (`runs.owner`: pid and start time). A restarted daemon recovers only runs whose owner is dead, so a `patina run` in a terminal keeps its run, and a reused pid is not mistaken for the old process.
+- **Pause takes effect before the next model turn.** A command or an approval in progress finishes first, so no call is left half done. Pausing ends the run's background processes, like any end of a run; a resumed agent starts them again if it needs them. The brief does not say; keeping processes across a pause would mean keeping a sandbox alive with no task watching it.
+- **Paused is a resumable end, not a live state.** The run's task ends, `run_finished` is logged with `status: paused` and a `reason` (`owner` or `loop`), and Resume starts a new task. Resumable: paused, interrupted, failed, budget_exceeded, and waiting_approval with no task. Not resumable: completed and cancelled (Stop means stop), and runs whose history was pruned.
+- **A failed run is resumable** (the brief: a provider failure "fails the run in a resumable state"). A run that failed before its agent started, for example in `worktree_setup`, prepares its worktree again when resumed.
+- **Resuming uses the current agent config, project policy and sandbox.** The sandbox is resolved again and fails closed. A budget-stopped run resumes only once its limit leaves room (409 `budget` otherwise).
+- **A turn cut off by a shutdown or crash is finished call by call on resume**, from the event log and approvals: a logged result is reused; a call that started and never reported back gets an error result saying it was interrupted and may have run in part (it is never repeated by Patina); an approval answered while no task ran is carried out; an unanswered approval is asked again; a call that never started runs. Approvals record `delivered` when the loop receives the answer, which separates "answered, not yet acted on" from "may have run".
+- **A clean shutdown leaves the turn open** instead of writing "not run" results, so a run waiting for an approval keeps waiting (status `waiting_approval`, no `run_finished`), and answering it after the restart resumes the run. Stop still writes results for every open call.
+- **A step cut off by a crash is not counted.** Usage is stored with every `usage` event, which comes after the model's answer; a clean shutdown stores the tracker's total, which counts it.
+- **Messages to a run** are a new event type, `user_message`, logged when the agent reads them. They are stored in a `steering` table (migration 4) until then. A message to a paused or interrupted run queues it and resumes the run; to a finished run it is refused (409 `finished`); a message that could not be delivered is taken back. A message that arrives as the agent gives its final answer still gets one more turn. Rollback notes now use the same queue, so they cannot split a tool call from its result.
+- **Loop breaker:** the same tool name with equal arguments three times in a row, across turns, pauses the run after the third call has its result. The count restarts on resume.
+- **Compaction** follows the brief: past 70% of `context_window`, first old large outputs (2 KB or more, older than the latest three turns) become a pointer to an artifact, then the same model summarizes the oldest turns with no tools and a summarizer system prompt, keeping the latest ten turns (fewer only if ten do not fit, down to one). The owner's prompt stays word for word; an earlier summary is folded into the next. History is cut only in front of an assistant message. Token counts are estimated at four characters per token, scaled by what the provider's counts showed (never below 1). A summary request is counted against the token budget, is not a step, and is tried three times; if it cannot be made, the run goes on with a logged error.
+- **Retention** deletes events, agent contexts, approvals, delivered messages and artifacts of runs that ended more than `retention_days` ago, at start and every six hours, and marks them `pruned_at`. Run rows, branches, worktrees and checkpoints stay: they are the owner's work. Paused and waiting runs are never pruned. The setting stays in `config.toml`; the Settings page shows it.
+- **Shutdown** waits up to 30 seconds for runs to record that they were interrupted, and removes their containers.
+- **New routes:** `POST /runs/:id/pause`, `/resume`, `/messages` (as the brief lists). `RunView` gained `can_resume` and `pruned`; `SystemInfo` gained `retention_days`.
+- **`patina run` exits with 5** when the run pauses (the loop breaker); it cannot resume, the web UI can.
+- **The UI keeps an agent's block across a resume**, and the timeline shows notes for pauses, resumes and compactions, and the owner's messages where the agent read them.
+
+## M4 dependencies (stripped release binary: 10.9 MB, up from 10.6 MB; idle memory 10.1 MB; UI 23.1 KB gzipped)
+- None new. Test only: `reqwest` in the `patina` crate's tests, already used by the server tests, to drive a real daemon across a restart.
+
 ## Open risks
 - rustls uses aws-lc-rs, which needs a C toolchain when cross-compiling. Check static musl builds early in M8, and switch to the ring provider if needed.
 - Live checks against real hosted providers have not been run (they need the owner's keys). This now includes tool calls and reasoning replay on those providers.
-- A run that waits for approval when the daemon restarts cannot continue until M4 adds recovery.
 - Commands have no memory, CPU or process-count limit until M8. A command can slow the machine until its timeout.
 - Under Landlock a command can read `/proc` (names and command lines of other processes), can use UDP even with `network = false`, and before ABI 6 can signal other processes.
 - While a background command swaps folders for links, `list_files` and `search` can list file names outside the worktree, never content.
 - Windows has no process-tree kill and no no-follow open yet; the container backend is the only sandbox there and is untested on Windows.
 - The container backend is tested against Docker only, not Podman.
+- Resuming after a crash relies on the event log describing each tool call. A tool whose effect lands outside the worktree (a command that calls a remote API) may have taken effect before the crash; the agent is told the call was interrupted and may have run in part.
+- Compaction quality depends on the model's summary. It is tested with scripted models only.

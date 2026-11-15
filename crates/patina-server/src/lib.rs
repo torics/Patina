@@ -42,6 +42,9 @@ pub fn router(st: Arc<AppState>) -> Router {
         .route("/runs", get(runs::list_runs).post(runs::create_run))
         .route("/runs/{id}", get(runs::get_run))
         .route("/runs/{id}/cancel", post(runs::cancel_run))
+        .route("/runs/{id}/pause", post(runs::pause_run))
+        .route("/runs/{id}/resume", post(runs::resume_run))
+        .route("/runs/{id}/messages", post(runs::send_message))
         .route("/runs/{id}/events", get(runs::run_events))
         .route("/runs/{id}/budgets", axum::routing::patch(runs::patch_budgets))
         .route("/approvals", get(runs::list_approvals))
@@ -146,13 +149,39 @@ pub async fn serve(
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
     tracing::info!(addr = %listener.local_addr()?, "listening");
+    match engine::recover(&st).await {
+        Ok(ids) if !ids.is_empty() => tracing::info!(runs = ids.len(), "found runs that were in progress when Patina stopped"),
+        Ok(_) => {}
+        Err(e) => tracing::error!(error = %e.message, "could not check for interrupted runs"),
+    }
+    // Retention runs at start and every six hours.
+    let pruner = {
+        let st = st.clone();
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(std::time::Duration::from_secs(6 * 3600));
+            loop {
+                every.tick().await;
+                match engine::prune(&st).await {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!(runs = n, "removed the logs of old runs (retention)"),
+                    Err(e) => tracing::warn!(error = %e.message, "retention failed"),
+                }
+            }
+        })
+    };
     let runs_state = st.clone();
     let shutdown = async move {
         shutdown.await;
-        // Stop model streams so open SSE connections finish and the listener can drain.
-        for h in runs_state.runs.lock().unwrap().values() {
-            h.cancel.cancel();
-        }
+        // Runs record themselves as interrupted, so they can be resumed; their streams then end and the listener
+        // can drain.
+        engine::shutdown(&runs_state, SHUTDOWN_LIMIT).await;
     };
-    axum::serve(listener, router(st)).with_graceful_shutdown(shutdown).await
+    let served = axum::serve(listener, router(st.clone())).with_graceful_shutdown(shutdown).await;
+    pruner.abort();
+    // A run that was still recording when the connections drained gets the rest of its time.
+    engine::shutdown(&st, SHUTDOWN_LIMIT).await;
+    served
 }
+
+/// How long a shutdown waits for runs to record that they were interrupted.
+const SHUTDOWN_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);

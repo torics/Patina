@@ -9,7 +9,7 @@ import type { ProviderTestResult } from "./api/generated/ProviderTestResult";
 import type { ProviderView } from "./api/generated/ProviderView";
 import { api, ApiError } from "./api";
 import { lines, looksLikeCredentials, parseEnv } from "./policy";
-import { agents, projects, providers, refresh, report, sandbox, toolNames, view } from "./state";
+import { agents, projects, providers, refresh, report, retentionDays, sandbox, toolNames, view } from "./state";
 
 const KINDS: ProviderKind[] = ["openai_compatible", "openai", "anthropic", "gemini", "ollama"];
 
@@ -305,6 +305,10 @@ function SandboxCard() {
         <li>Container runtime: {s.container_runtime ?? "none found"}</li>
         <li>Memory, CPU and process limits: {s.resource_limits.length ? s.resource_limits.join(", ") : "none enforced"}</li>
       </ul>
+      <p class="muted">
+        Run history: {retentionDays.value === 0 ? "kept until you delete it." : `the logs of runs that ended more than ${retentionDays.value} days ago are removed. Their changes and checkpoints stay.`} Set{" "}
+        <code>retention_days</code> in <code>config.toml</code> to change this.
+      </p>
     </div>
   );
 }

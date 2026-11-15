@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Event } from "./api/generated/Event";
-import { applyDelta, applyEvent, emptyTimeline, isTerminal, visibleText, waitingApprovals, type ToolItem } from "./reducer";
+import { applyDelta, applyEvent, emptyTimeline, isActive, isTerminal, visibleText, waitingApprovals, type ToolItem } from "./reducer";
 
 let seq = 0;
 function ev(type: string, payload: Record<string, any> = {}, agent: string | null = "a"): Event {
@@ -208,5 +208,57 @@ describe("event reducer", () => {
     seq = 0;
     const t = build([ev("run_started", { prompt: "hi", has_workspace: false, sandbox: null, sandbox_detail: null }, null)]);
     expect([t.sandbox, t.sandboxDetail, t.setup]).toEqual([null, null, []]);
+  });
+
+  it("continues the same block when a paused run resumes, and answers a call made before the pause", () => {
+    seq = 0;
+    const t = build([
+      ev("run_started", { prompt: "go" }, null),
+      ev("agent_started", { name: "A" }),
+      ev("tool_call", { id: "c1", name: "write_file", args: { path: "a" } }),
+      ev("approval_requested", { approval_id: "ap1", tool_call_id: "c1" }),
+      ev("agent_finished", { status: "interrupted" }),
+      ev("run_finished", { status: "interrupted", error: "Patina stopped while this run was in progress. Resume it to continue." }, null),
+      ev("approval_resolved", { approval_id: "ap1", tool_call_id: "c1", action: "approve" }),
+      ev("run_started", { prompt: "go", resumed: true }, null),
+      ev("agent_started", { name: "A" }),
+      ev("tool_result", { id: "c1", name: "write_file", content: "created a", is_error: false }),
+      ev("agent_finished", { status: "completed" }),
+      ev("run_finished", { status: "completed" }, null),
+    ]);
+    expect(t.blocks).toHaveLength(1);
+    const items = t.blocks[0].items;
+    expect(items.map((i) => i.kind)).toEqual(["tool", "note", "note"]);
+    const tool = items[0] as ToolItem;
+    expect([tool.state, tool.result, tool.approval?.state]).toEqual(["done", "created a", "approve"]);
+    expect(items[1]).toEqual({ kind: "note", text: "Patina stopped while this run was in progress. Resume it to continue.", tone: "warn" });
+    expect(items[2]).toEqual({ kind: "note", text: "Resumed.", tone: "info" });
+    expect(t.status).toBe("completed");
+  });
+
+  it("shows the owner's messages, pauses and a shortened context where they happened", () => {
+    seq = 0;
+    let t = build([
+      ev("run_started", { prompt: "go" }, null),
+      ev("agent_started", { name: "A" }),
+      ev("compaction", { stage: "outputs", outputs_replaced: 2, tokens_before: 9000, tokens_after: 4000 }),
+      ev("user_message", { text: "Use tabs" }),
+      ev("compaction", { stage: "summary", turns_summarized: 6, turns_kept: 10, tokens_before: 90000, tokens_after: 20000 }),
+      ev("agent_finished", { status: "paused" }),
+      ev("run_finished", { status: "paused", reason: "loop", error: "The agent made the same read_file call 3 times in a row, so the run was paused." }, null),
+    ]);
+    const items = t.blocks[0].items;
+    expect(items.map((i) => i.kind)).toEqual(["note", "message", "note", "note"]);
+    expect(items[1]).toEqual({ kind: "message", text: "Use tabs" });
+    expect((items[0] as { text: string }).text).toContain("replaced 2 old tool outputs");
+    expect((items[2] as { text: string }).text).toContain("summarized the 6 oldest turns and kept the latest 10 word for word (about 20,000 tokens, down from 90,000)");
+    expect(items[3]).toMatchObject({ tone: "warn", text: expect.stringContaining("same read_file call") });
+    expect([isActive(t.status), isTerminal(t.status)]).toEqual([false, false]);
+    // The owner's own pause reads differently, and a resume clears the old error.
+    t = applyEvent(t, ev("run_started", { resumed: true }, null));
+    expect([t.status, t.error, isActive(t.status)]).toEqual(["running", null, true]);
+    t = applyEvent(t, ev("run_finished", { status: "paused", reason: "owner", error: null }, null));
+    expect(t.blocks[0].items.at(-1)).toEqual({ kind: "note", text: "Paused. Resume it, or send the agent a message.", tone: "info" });
+    expect(isActive("waiting_approval") && isActive("queued") && !isActive("interrupted")).toBe(true);
   });
 });

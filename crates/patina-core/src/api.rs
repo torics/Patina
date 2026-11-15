@@ -98,6 +98,18 @@ pub struct RunView {
     pub disposition: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// True when the run is paused, interrupted, failed, stopped by a budget or waiting after a restart, and
+    /// nothing prevents resuming it.
+    pub can_resume: bool,
+    /// True once the retention setting removed the run's log.
+    pub pruned: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RunMessage {
+    /// What the owner tells the agent. It reaches the agent before its next model turn.
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -247,6 +259,8 @@ pub struct SystemInfo {
     pub sandbox: SandboxStatus,
     /// Names of the tools an agent can be given.
     pub tools: Vec<String>,
+    /// Logs of runs that ended more than this many days ago are removed. 0 keeps them. Set in `config.toml`.
+    pub retention_days: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

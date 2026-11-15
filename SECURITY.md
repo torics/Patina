@@ -101,6 +101,13 @@ API keys are encrypted with XChaCha20-Poly1305 and bound to their name. The mast
 
 This protects backups and copied database files. It does not protect against a compromised host account: anyone who can read the data folder as you can read the master key. A sandboxed command cannot read the data folder.
 
+## Restarts
+
+- A run in progress when the daemon stops is resumed only when you ask. Nothing an agent started survives the restart: at start the daemon kills every process that carries a dead run's marker and removes the run's container.
+- A resumed run gets the project's current policy and sandbox. A sandbox that is no longer available refuses the resume, as it would refuse a new run.
+- A tool call that was cut off is reported to the agent as interrupted. It is never run a second time on Patina's initiative. A call you approved while the daemon was down runs once, when you resume.
+- Messages you send to a run are your instructions to the agent, like the prompt. Text in files and tool results still is not.
+
 ## Not in place yet
 
 - Resource limits for commands (cgroup v2), planned for the hardening milestone.

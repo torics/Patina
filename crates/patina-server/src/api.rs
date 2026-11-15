@@ -262,5 +262,6 @@ pub async fn system(State(st): St) -> Json<SystemInfo> {
         git_version: patina_tools::git::version().await,
         sandbox: st.caps().await.status(),
         tools: patina_tools::tool_names().iter().map(|t| t.to_string()).collect(),
+        retention_days: st.config.retention_days,
     })
 }

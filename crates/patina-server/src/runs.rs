@@ -9,7 +9,7 @@ use axum::{
     response::sse::{Event as SseEvent, KeepAlive, Sse},
 };
 use futures::{Stream, StreamExt};
-use patina_core::api::{ApprovalAnswer, ApprovalView, NewRun, RunView};
+use patina_core::api::{ApprovalAnswer, ApprovalView, NewRun, RunMessage, RunView};
 use patina_core::budget::Budgets;
 use patina_store::{Db, approvals, runs as store};
 use serde::Deserialize;
@@ -24,7 +24,10 @@ type St = State<Arc<AppState>>;
 pub fn view(st: &AppState, r: store::RunRow) -> RunView {
     // A live run reports usage from its tracker; a finished one from the stored total.
     let live = st.runs.lock().unwrap().get(&r.id).map(|h| h.budget.usage());
+    let can_resume = engine::can_resume(st, &r);
     RunView {
+        can_resume,
+        pruned: r.pruned_at.is_some(),
         agent_id: r.team_id.strip_prefix("agent:").unwrap_or(&r.team_id).to_string(),
         budgets: engine::budgets_of(&r),
         usage: live.unwrap_or_else(|| serde_json::from_value(r.usage.clone()).unwrap_or_default()),
@@ -70,6 +73,26 @@ pub async fn cancel_run(State(st): St, Path(id): Path<String>) -> ApiResult<Json
         }
         None => Err(ApiError::conflict("not_running", "the run is not running")),
     }
+}
+
+/// Pause a running run before its next model turn.
+pub async fn pause_run(State(st): St, Path(id): Path<String>) -> ApiResult<Json<RunView>> {
+    load(&st, &id).await?;
+    engine::pause_run(&st, &id)?;
+    Ok(Json(view(&st, load(&st, &id).await?)))
+}
+
+/// Resume a paused, interrupted, failed or budget-stopped run.
+pub async fn resume_run(State(st): St, Path(id): Path<String>) -> ApiResult<Json<RunView>> {
+    load(&st, &id).await?;
+    engine::resume_run(&st, &id).await?;
+    Ok(Json(view(&st, load(&st, &id).await?)))
+}
+
+/// Send the run's agent a message. A paused or interrupted run is resumed to read it.
+pub async fn send_message(State(st): St, Path(id): Path<String>, Json(m): Json<RunMessage>) -> ApiResult<Json<RunView>> {
+    engine::send_message(&st, &id, &m.text).await?;
+    Ok(Json(view(&st, load(&st, &id).await?)))
 }
 
 /// Change a run's budgets. A live run picks the new limits up before its next step.

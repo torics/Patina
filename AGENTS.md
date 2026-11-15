@@ -14,3 +14,6 @@
 - A sandbox backend that cannot enforce what was asked returns an error. It never falls back to something weaker.
 - Sandbox and escape tests live in `crates/patina/tests/sandbox.rs` and drive the real binary. A new way out gets a test there first.
 - New event types or payload fields need a case in `ui/src/reducer.ts` and a test in `ui/src/reducer.test.ts`.
+- Never add a message to an agent's stored history from outside the loop: it could land between a tool call and its result. Queue it with `store::add_steering`; the loop delivers it before the next model turn.
+- An agent's history may only be cut in front of an assistant message (`compact::turn_start`). Any new way of shortening history needs the pairing test in `compact.rs`.
+- Anything a run does that must survive a restart is written before it takes effect: the approval row before the event, `delivered` before the call runs, usage with every `usage` event.

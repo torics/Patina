@@ -69,3 +69,9 @@ a { color: var(--accent); }
   .chat aside { order: 2; }
   main { padding: .75rem; }
 }
+
+.note { margin: 0.4rem 0; padding: 0.3rem 0.6rem; border-left: 3px solid var(--line); color: var(--muted); font-size: 0.9em; }
+.note.warn { border-left-color: var(--warn); color: inherit; }
+.bubble.user.steer { margin: 0.5rem 0 0.5rem 2rem; }
+.bubble.user.steer small { display: block; opacity: 0.7; }
+form.composer.steer { margin-top: 1rem; }
