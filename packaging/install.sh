@@ -4,7 +4,8 @@
 #   curl -fsSL https://github.com/torics/Patina/releases/latest/download/install.sh | sh
 #
 # PATINA_VERSION picks a release (for example v0.2.0; the latest by default), PATINA_INSTALL_DIR the folder
-# (~/.local/bin by default). For a private repository, download with `gh release download` instead.
+# (~/.local/bin by default), PATINA_BASE_URL a mirror that holds the release files. For a private repository,
+# download with `gh release download` instead.
 set -eu
 
 REPO="${PATINA_REPO:-torics/Patina}"
@@ -25,7 +26,9 @@ case "$(uname -m)" in
 esac
 target="$arch-$os"
 
-if [ "$VERSION" = latest ]; then
+if [ -n "${PATINA_BASE_URL:-}" ]; then
+  base="$PATINA_BASE_URL"
+elif [ "$VERSION" = latest ]; then
   base="https://github.com/$REPO/releases/latest/download"
 else
   base="https://github.com/$REPO/releases/download/$VERSION"

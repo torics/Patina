@@ -4,7 +4,6 @@ name: release
 on:
   push:
     tags: ["v*"]
-    branches: [m8-wip]  # TEMPORARY: exercise the build matrix before merging
   # A manual run builds and checks everything but publishes nothing.
   workflow_dispatch:
 env:

@@ -90,8 +90,16 @@ async fn commands_get_a_cgroup_of_their_own_that_holds_their_limits() {
     assert!(!tree.commands().join("cg-1").exists(), "the command's cgroup was not removed");
 
     // Memory: a command that keeps allocating is stopped by the kernel, not left to take the host.
-    let hog = run(sb.as_ref(), "tail /dev/zero", "cg-2").await;
-    assert!(!hog.timed_out && hog.exit_code != Some(0), "{hog:?}");
+    let hog = run(
+        sb.as_ref(),
+        "python3 -c \"b = b'x' * (300 * 1024 * 1024); print('allocated', len(b))\"",
+        "cg-2",
+    )
+    .await;
+    assert!(
+        !hog.timed_out && hog.exit_code != Some(0) && !hog.output.contains("allocated"),
+        "{hog:?}"
+    );
 
     // Processes: forking past the cap fails.
     let forks = run(sb.as_ref(), "for i in $(seq 40); do sleep 3 & done; wait; echo done", "cg-3").await;

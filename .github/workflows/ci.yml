@@ -36,6 +36,7 @@ jobs:
       - name: What this host supports
         run: ./target/release/patina doctor --config-dir "$RUNNER_TEMP/patina-config" --data-dir "$RUNNER_TEMP/patina-data"
       - run: ./scripts/check-budgets.sh
+      - run: ./scripts/check-install.sh
       - name: Browser smoke test
         working-directory: ui
         run: npx playwright install --with-deps chromium && npx playwright test --trace off
