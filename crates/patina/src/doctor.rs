@@ -340,6 +340,11 @@ async fn worktree_checks(c: &mut Checks, paths: &Paths) {
 
 pub async fn report(paths: &Paths) -> Report {
     let mut c = Checks(vec![]);
+    c.add(
+        "folders",
+        Status::Ok,
+        format!("config {}\ndata {}", paths.config_dir.display(), paths.data_dir.display()),
+    );
     match git::version().await {
         Some(v) => c.add("git", Status::Ok, v),
         None => c.add("git", Status::Problem, "git was not found on PATH. Projects need it."),

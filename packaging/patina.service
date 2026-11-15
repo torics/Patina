@@ -1,0 +1,24 @@
+# A systemd user unit for the Patina daemon. Install with:
+#   mkdir -p ~/.config/systemd/user && cp patina.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now patina
+#   loginctl enable-linger "$USER"     # keep it running while you are logged out
+[Unit]
+Description=Patina agent workbench
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/patina serve
+Restart=on-failure
+# Hands Patina its own cgroup, so that each command gets a cgroup with the project's memory, process and CPU
+# limits and is stopped as a whole. `patina doctor` and Settings show whether it took effect.
+Delegate=yes
+# SIGTERM to Patina alone: it marks running runs interrupted and stops their commands itself. What is left
+# after that is killed.
+KillMode=mixed
+TimeoutStopSec=30
+# Provider keys from the environment, if you use env: references, go in a file only you can read:
+# EnvironmentFile=%h/.config/patina/env
+
+[Install]
+WantedBy=default.target

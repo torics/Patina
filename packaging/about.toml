@@ -12,9 +12,7 @@ accepted = [
     "MPL-2.0",
     "0BSD",
     "CDLA-Permissive-2.0",
-    "OpenSSL",
 ]
 # Only what the shipped binary links: not tests, benches or build tools of other platforms.
 ignore-build-dependencies = false
 ignore-dev-dependencies = true
-no-clearly-defined = true
