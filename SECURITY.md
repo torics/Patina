@@ -92,6 +92,8 @@ The **allowlist** saves you a question; it is not a security control. A pattern 
 - **Bind**: `127.0.0.1` by default. A non-loopback bind is refused unless a password is set and a non-localhost name is in `allowed_hosts`.
 - **Headers**: `Content-Security-Policy: default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`, plus `frame-src` naming only the preview origin, `nosniff`, `no-referrer` and `X-Frame-Options: DENY`. No `unsafe-inline` anywhere: the editor styles itself with constructed style sheets inside a shadow root.
 - **Keys never reach the browser.** The API accepts a key and never returns it; the UI shows the last four characters. Model output, file content and command output are rendered as text.
+- **Configured secrets are removed from output.** Every stored secret (provider keys, MCP values) and every variable a provider or MCP server takes with `env:` is replaced with `[secret removed by Patina]` in tool results, command output, the `worktree_setup` log and the preview's dev server log, before any of it is stored, shown or sent to a model. Values shorter than eight characters are left alone, since they would match ordinary text. This catches a key that a project also keeps in a file, or that a tool echoes back; it cannot catch a secret that was transformed, such as base64-encoded.
+- **Every route is checked.** A test reads the router's source and asserts, for each route and method, that it needs a session, that a change needs the CSRF token and a same-host `Origin`, that a foreign `Host` is refused, and that no response carries a stored secret. The sign-in routes check `Origin` before reading the request body.
 - **Patina's folders cannot be a project**: a folder that contains or sits inside the config or data folder is refused.
 - **Budgets** stop a run at its step, token or time limit, and at its cost limit where the model has a configured price.
 - **Model output and file content are data.** The system preamble tells the model that text in files and tool results is not an instruction.
@@ -139,7 +141,7 @@ This protects backups and copied database files. It does not protect against a c
 
 ## Outbound calls
 
-The daemon calls only the providers you configure and the MCP servers you add, and the preview proxy calls only `127.0.0.1` on the selected run's port. A stdio MCP server, being a program you installed, can call whatever it was written to call. Commands an agent runs can call anything the project's network setting allows.
+The daemon calls only the providers you configure and the MCP servers you add, and the preview proxy calls only `127.0.0.1` on the selected run's port. `patina version --check` asks the release feed (`api.github.com`) for the latest version; it runs only when you type it, and the daemon never does. A stdio MCP server, being a program you installed, can call whatever it was written to call. Commands an agent runs can call anything the project's network setting allows.
 
 ## Reporting a problem
 
