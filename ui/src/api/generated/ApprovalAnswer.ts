@@ -10,4 +10,8 @@ note: string | null, args: Record<string, any> | null,
  * With an approval of a command: also add this pattern to the project's allowlist, so that matching
  * commands stop asking.
  */
-allow_pattern: string | null, };
+allow_pattern: string | null, 
+/**
+ * With an approval of an MCP tool: also trust the tool, so that it stops asking, in this run and later ones.
+ */
+trust_tool: boolean, };

@@ -1,5 +1,10 @@
 import { useEffect, useState } from "preact/hooks";
 import type { AgentConfig } from "./api/generated/AgentConfig";
+import type { McpServerView } from "./api/generated/McpServerView";
+import type { McpToolView } from "./api/generated/McpToolView";
+import type { McpTransport } from "./api/generated/McpTransport";
+import type { McpValueInput } from "./api/generated/McpValueInput";
+import type { McpValueView } from "./api/generated/McpValueView";
 import type { PolicyMode } from "./api/generated/PolicyMode";
 import type { PresetView } from "./api/generated/PresetView";
 import type { ProjectView } from "./api/generated/ProjectView";
@@ -12,7 +17,7 @@ import type { TeamMode } from "./api/generated/TeamMode";
 import type { TemplateView } from "./api/generated/TemplateView";
 import { api, ApiError } from "./api";
 import { lines, looksLikeCredentials, parseEnv } from "./policy";
-import { agents, projects, providers, refresh, report, retentionDays, sandbox, teams, templates, toolNames, view } from "./state";
+import { agents, mcpServers, projects, providers, refresh, report, retentionDays, sandbox, teams, templates, toolNames, view } from "./state";
 
 const KINDS: ProviderKind[] = ["openai_compatible", "openai", "anthropic", "gemini", "ollama"];
 
@@ -196,7 +201,7 @@ function AgentForm({ existing, onDone }: { existing?: AgentConfig; onDone: () =>
         provider,
         model: model.trim(),
         system_prompt: system,
-        tools: toolNames.value.filter((t) => tools.includes(t)),
+        tools: [...toolNames.value.filter((t) => tools.includes(t)), ...tools.filter((t) => t.startsWith("mcp__"))],
         can_delegate_to: others.map((a) => a.id).filter((id) => delegates.includes(id)),
       };
       if (existing) await api.updateAgent({ ...existing, ...fields });
@@ -259,6 +264,7 @@ function AgentForm({ existing, onDone }: { existing?: AgentConfig; onDone: () =>
           </label>
         ))}
       </fieldset>
+      {mcpServers.value.length > 0 && <McpToolPicker tools={tools} setTools={setTools} />}
       {error && <p class="error">{error}</p>}
       <div class="row">
         <button type="submit">Save</button>
@@ -840,6 +846,308 @@ function TeamsSection() {
   );
 }
 
+
+/** The MCP tools an agent may use, in or out of a project: every tool of a server, or chosen ones. */
+function McpToolPicker({ tools, setTools }: { tools: string[]; setTools: (t: string[]) => void }) {
+  return (
+    <fieldset>
+      <legend>MCP tools the agent may use</legend>
+      {mcpServers.value.map((s) => (
+        <McpServerPick key={s.id} server={s} tools={tools} setTools={setTools} />
+      ))}
+    </fieldset>
+  );
+}
+
+function McpServerPick({ server, tools, setTools }: { server: McpServerView; tools: string[]; setTools: (t: string[]) => void }) {
+  const all = `mcp__${server.id}`;
+  const prefix = `${all}__`;
+  const chosen = tools.filter((t) => t.startsWith(prefix));
+  const [list, setList] = useState<McpToolView[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  async function load() {
+    setLoading(true);
+    setError(null);
+    try {
+      setList(await api.mcpTools(server.id));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+  const toggle = (name: string, on: boolean) => setTools(on ? [...tools, name] : tools.filter((x) => x !== name));
+  return (
+    <div class="mcp-pick">
+      <label class="check">
+        <input type="checkbox" checked={tools.includes(all)} onChange={(e) => toggle(all, e.currentTarget.checked)} />
+        Every tool of {server.id}
+        {!server.enabled && <span class="muted"> (disabled)</span>}
+      </label>
+      {!tools.includes(all) && (
+        <div class="indent">
+          {chosen.length > 0 && !list && <p class="muted">Chosen: {chosen.map((t) => t.slice(prefix.length)).join(", ")}</p>}
+          {list ? (
+            list.map((t) => (
+              <label class="check" title={t.description}>
+                <input type="checkbox" checked={tools.includes(t.exposed)} onChange={(e) => toggle(t.exposed, e.currentTarget.checked)} />
+                {t.name}
+              </label>
+            ))
+          ) : (
+            <button type="button" class="link" onClick={load} disabled={loading || !server.enabled}>
+              {loading ? "Starting the server…" : `Choose tools of ${server.id}`}
+            </button>
+          )}
+          {error && <p class="error">{error}</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+type ValueRow = { name: string; value: string; existing?: McpValueView };
+
+function sourceLabel(v: McpValueView) {
+  return v.source === "secret" ? "stored secret" : v.source === "env" ? `from $${v.var}` : "set in mcp.toml";
+}
+
+/** Names and values for a server's environment or headers. Stored values are never shown; empty keeps them. */
+function ValuesEditor({ label, rows, setRows, placeholder }: { label: string; rows: ValueRow[]; setRows: (r: ValueRow[]) => void; placeholder: string }) {
+  const set = (i: number, patch: Partial<ValueRow>) => setRows(rows.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  return (
+    <fieldset>
+      <legend>{label}</legend>
+      {rows.map((r, i) => (
+        <div class="row">
+          <input aria-label={`${label}: name`} placeholder={placeholder} value={r.name} disabled={!!r.existing} onInput={(e) => set(i, { name: e.currentTarget.value })} />
+          <input
+            aria-label={`${label}: value of ${r.name || "new entry"}`}
+            type="password"
+            autocomplete="off"
+            placeholder={r.existing ? `${sourceLabel(r.existing)}; type to replace` : "value, or env:VARIABLE"}
+            value={r.value}
+            onInput={(e) => set(i, { value: e.currentTarget.value })}
+          />
+          <button type="button" class="link danger" onClick={() => setRows(rows.filter((_, j) => j !== i))}>
+            Remove
+          </button>
+        </div>
+      ))}
+      <button type="button" class="link" onClick={() => setRows([...rows, { name: "", value: "" }])}>
+        Add
+      </button>
+    </fieldset>
+  );
+}
+
+function toInput(rows: ValueRow[]): McpValueInput[] {
+  return rows.filter((r) => r.name.trim()).map((r) => ({ name: r.name.trim(), value: r.value || null }));
+}
+
+function McpForm({ existing, onDone }: { existing?: McpServerView; onDone: () => void }) {
+  const [id, setId] = useState(existing?.id ?? "");
+  const [transport, setTransport] = useState<McpTransport>(existing?.transport ?? "stdio");
+  const [command, setCommand] = useState(existing?.command ?? "");
+  const [args, setArgs] = useState((existing?.args ?? []).join("\n"));
+  const [cwd, setCwd] = useState(existing?.cwd ?? "");
+  const [url, setUrl] = useState(existing?.url ?? "");
+  const [env, setEnv] = useState<ValueRow[]>((existing?.env ?? []).map((v) => ({ name: v.name, value: "", existing: v })));
+  const [headers, setHeaders] = useState<ValueRow[]>((existing?.headers ?? []).map((v) => ({ name: v.name, value: "", existing: v })));
+  const [timeout, setTimeout_] = useState(String(existing?.timeout_s ?? 120));
+  const [enabled, setEnabled] = useState(existing?.enabled ?? true);
+  const [error, setError] = useState<string | null>(null);
+  async function save(e: Event) {
+    e.preventDefault();
+    setError(null);
+    const stdio = transport === "stdio";
+    const input = {
+      id: id.trim(),
+      transport,
+      command: stdio ? command : null,
+      args: stdio ? lines(args) : [],
+      cwd: stdio ? cwd : null,
+      url: stdio ? null : url,
+      env: stdio ? toInput(env) : [],
+      headers: stdio ? [] : toInput(headers),
+      trusted_tools: existing?.trusted_tools ?? [],
+      timeout_s: Number(timeout) || 120,
+      enabled,
+    };
+    try {
+      if (existing) await api.updateMcpServer(input);
+      else await api.createMcpServer(input);
+      await refresh();
+      onDone();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+  return (
+    <form class="card" onSubmit={save}>
+      <h3>{existing ? `Edit ${existing.id}` : "Add an MCP server"}</h3>
+      {!existing && (
+        <label>
+          Name (letters, digits, - and _; tools appear as mcp__name__tool)
+          <input name="mcp_id" value={id} onInput={(e) => setId(e.currentTarget.value)} required pattern="[A-Za-z0-9_\-]{1,32}" />
+        </label>
+      )}
+      <label>
+        Connection
+        <select name="transport" value={transport} onChange={(e) => setTransport(e.currentTarget.value as McpTransport)}>
+          <option value="stdio">A program on this machine (stdio)</option>
+          <option value="http">A server at a URL (Streamable HTTP)</option>
+        </select>
+      </label>
+      {transport === "stdio" ? (
+        <>
+          <label>
+            Command
+            <input name="command" value={command} onInput={(e) => setCommand(e.currentTarget.value)} placeholder="npx" required />
+          </label>
+          <label>
+            Arguments, one per line
+            <textarea name="args" rows={3} value={args} onInput={(e) => setArgs(e.currentTarget.value)} />
+          </label>
+          <label>
+            Folder to start in (optional)
+            <input name="cwd" value={cwd} onInput={(e) => setCwd(e.currentTarget.value)} />
+          </label>
+          <ValuesEditor label="Environment variables" rows={env} setRows={setEnv} placeholder="NAME" />
+          <p class="muted">
+            The program runs outside the sandbox, as you, with only these variables and a minimal base ({"PATH, HOME, LANG and a few more"}). A value is stored encrypted, unless it is <code>env:NAME</code>, which takes the
+            daemon's own variable.
+          </p>
+        </>
+      ) : (
+        <>
+          <label>
+            URL
+            <input name="url" type="url" value={url} onInput={(e) => setUrl(e.currentTarget.value)} placeholder="https://example.com/mcp" required />
+          </label>
+          <ValuesEditor label="Headers" rows={headers} setRows={setHeaders} placeholder="Authorization" />
+          <p class="muted">Header values are stored encrypted, unless a value is <code>env:NAME</code>.</p>
+        </>
+      )}
+      <label>
+        Longest a call may take, in seconds
+        <input name="timeout_s" type="number" min={1} max={600} value={timeout} onInput={(e) => setTimeout_(e.currentTarget.value)} />
+      </label>
+      <label class="check">
+        <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.currentTarget.checked)} />
+        Enabled
+      </label>
+      {error && <p class="error">{error}</p>}
+      <div class="row">
+        <button type="submit">Save</button>
+        <button type="button" class="link" onClick={onDone}>
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
+function McpRow({ s }: { s: McpServerView }) {
+  const [editing, setEditing] = useState(false);
+  const [list, setList] = useState<McpToolView[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  async function load() {
+    setBusy(true);
+    setError(null);
+    try {
+      setList(await api.mcpTools(s.id));
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function trust(tool: string, on: boolean) {
+    try {
+      await api.trustMcpTool(s.id, tool, on);
+      setList((l) => l && l.map((t) => (t.name === tool ? { ...t, trusted: on } : t)));
+      await refresh();
+    } catch (e) {
+      report(e);
+    }
+  }
+  if (editing) return <McpForm existing={s} onDone={() => setEditing(false)} />;
+  const all = s.trusted_tools.includes("*");
+  return (
+    <li class="card">
+      <div class="row">
+        <strong>{s.id}</strong>
+        <span class="muted">{s.transport === "stdio" ? [s.command, ...s.args].join(" ") : s.url}</span>
+        <span class="muted">{!s.enabled ? "disabled" : s.connected ? "connected" : "not started"}</span>
+      </div>
+      <div class="row">
+        <button onClick={load} disabled={busy || !s.enabled}>
+          {busy ? "Starting…" : list ? "Refresh tools" : "Show tools"}
+        </button>
+        <button class="link" onClick={() => setEditing(true)} aria-label={`Edit ${s.id}`}>
+          Edit
+        </button>
+        <button
+          class="link danger"
+          aria-label={`Delete ${s.id}`}
+          onClick={() =>
+            api
+              .deleteMcpServer(s.id)
+              .then(refresh)
+              .catch(report)
+          }
+        >
+          Delete
+        </button>
+      </div>
+      {error && (
+        <pre class="error" role="status">
+          {error}
+        </pre>
+      )}
+      {list && (
+        <fieldset>
+          <legend>Tools that run without asking</legend>
+          <label class="check">
+            <input type="checkbox" checked={all} onChange={(e) => trust("*", e.currentTarget.checked)} />
+            Trust every tool of {s.id}, including tools it adds later
+          </label>
+          {list.map((t) => (
+            <label class="check" title={t.description}>
+              <input type="checkbox" checked={all || t.trusted} disabled={all} onChange={(e) => trust(t.name, e.currentTarget.checked)} />
+              <code>{t.name}</code> <span class="muted">{t.description}</span>
+            </label>
+          ))}
+          {list.length === 0 && <p class="muted">The server offers no tools.</p>}
+        </fieldset>
+      )}
+    </li>
+  );
+}
+
+function McpSection() {
+  const [adding, setAdding] = useState(false);
+  return (
+    <section>
+      <h2>MCP servers</h2>
+      <p class="muted">
+        An MCP server gives agents more tools, such as web search. Give an agent a server's tools in its settings. A tool asks before each call until you trust it, because the server runs outside the sandbox and
+        what it returns comes from outside Patina.
+      </p>
+      <ul class="list">
+        {mcpServers.value.map((s) => (
+          <McpRow key={s.id} s={s} />
+        ))}
+      </ul>
+      {adding ? <McpForm onDone={() => setAdding(false)} /> : <button onClick={() => setAdding(true)}>Add MCP server</button>}
+    </section>
+  );
+}
+
 export function Settings() {
   const [addingProvider, setAddingProvider] = useState(false);
   const [addingAgent, setAddingAgent] = useState(false);
@@ -889,6 +1197,7 @@ export function Settings() {
         </section>
       )}
       {!noProviders && <TeamsSection />}
+      {!noProviders && <McpSection />}
       {!noAgents && (
         <section>
           <h2>Projects</h2>

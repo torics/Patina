@@ -28,3 +28,4 @@ tokio = { workspace = true, features = ["io-util", "test-util"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream"] }
 tempfile.workspace = true
 patina-providers.workspace = true
+rmcp = { version = "3.10", default-features = false, features = ["server", "macros", "transport-streamable-http-server"] }

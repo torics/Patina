@@ -2,7 +2,7 @@
 
 A lean, self-hosted, model-agnostic agent workbench in one Rust binary. The daemon serves a browser UI, holds your API keys, calls any LLM provider on your behalf and stores every run so you can watch and review it from any device.
 
-Status: **M6 (workbench)**. You can set a password, add providers and agents, and chat with streaming. An agent can work in a project: it reads, searches and edits files and runs commands in its own git worktree. Commands run in a sandbox (Landlock on Linux, or a container), each changing step is a checkpoint you can roll back to, and nothing reaches your branch until you merge. Runs can be paused, resumed and steered with messages, survive a restart of the daemon, and keep long histories inside the model's context. Teams run several agents, each on its own provider and model, from three built-in templates or your own. The workbench shows a project's files, an editor, each run's changes as diffs, and a live preview of the run's dev server, and it works from a phone. MCP arrives in the next milestone. See `DECISIONS.md`.
+Status: **M7 (MCP)**. You can set a password, add providers and agents, and chat with streaming. An agent can work in a project: it reads, searches and edits files and runs commands in its own git worktree. Commands run in a sandbox (Landlock on Linux, or a container), each changing step is a checkpoint you can roll back to, and nothing reaches your branch until you merge. Runs can be paused, resumed and steered with messages, survive a restart of the daemon, and keep long histories inside the model's context. Teams run several agents, each on its own provider and model, from three built-in templates or your own. The workbench shows a project's files, an editor, each run's changes as diffs, and a live preview of the run's dev server, and it works from a phone. Agents can use tools from MCP servers, over stdio or Streamable HTTP; each tool asks before every call until you trust it. Hardening and release builds come next. See `DECISIONS.md`.
 
 ## Build and run
 
@@ -62,6 +62,14 @@ In the prompt box, `@` suggests files from the project. Each file you mention go
 On a phone the panes become tabs (Run, Browse, Changes, Editor, Preview), with the run first, so a run can be started, steered, approved and merged by touch.
 
 To use Patina from another device, put `tailscale serve` in front of the app port and, for the preview, the preview port (for example `tailscale serve --https=8443 http://127.0.0.1:7879`), then set `preview_origin` in `config.toml` to that address.
+
+## MCP servers
+
+MCP servers give agents more tools, such as web search or an issue tracker. Add one under Settings, MCP servers: a program on this machine (stdio, for example `npx -y some-mcp-server`) or a server at a URL (Streamable HTTP). Values you type for its environment variables or headers, such as tokens, are stored encrypted; `env:NAME` takes a variable of the daemon's environment instead. **Show tools** starts the server and lists what it offers.
+
+Then give an agent tools in its settings: every tool of a server, or chosen ones. MCP tools work in a plain chat too. A model sees them as `mcp__<server>__<tool>`.
+
+An MCP tool asks before every call until you trust it, whatever the project's approval mode, because the server runs outside the sandbox. Trust a tool with **Approve and trust this tool** on its approval card, or in the server's tool list in Settings, where you can also withdraw it. `docs/mcp.md` has the details and an example `mcp.toml`.
 
 ## Commands and the sandbox
 

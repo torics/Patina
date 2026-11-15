@@ -122,15 +122,24 @@ This protects backups and copied database files. It does not protect against a c
 - **The preview frame** is sandboxed without `allow-same-origin` and loads from another origin (another port), so code the agent wrote cannot reach the app, its cookies or its API.
 - **The dev command** runs in the run's sandbox, as the agent's commands do, with the same limits. It is code the agent may have written: without a sandbox it runs as you, and starting it is your decision.
 
+## MCP servers
+
+- **Configured by you, outside the sandbox.** MCP servers are declared in `mcp.toml` or Settings. A stdio server is a program the daemon starts as your user; it is not confined by the run's sandbox, the same as any program you install. It starts with an empty environment plus `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `TZ` and `TMPDIR` (on Windows, the few variables a program needs to start) and the variables listed for it. No provider key, session or master key is passed.
+- **It runs in its own process group** (a job object on Windows), stopped as a whole when its connection ends, so a child it started does not outlive it.
+- **Every MCP tool asks** before each call until you trust it, in every approval mode, because nothing contains what the server does. Trust is per tool and stored in `mcp.toml`; you can withdraw it in Settings.
+- **Results are untrusted.** Each one reaches the model with a line saying it comes from outside Patina and is data, not instructions, under the system preamble that says the same. Images, audio and binary content are described, not passed on.
+- **Values typed in Settings are secrets.** Environment variables and headers entered in the UI are stored encrypted, like provider keys, and the API shows only their names and where they come from. `env:NAME` reads the daemon's own variable instead.
+- **An agent sees only the MCP tools its `tools` list names**: a whole server or single tools.
+
 ## Not in place yet
 
 - Resource limits for commands (cgroup v2), planned for the hardening milestone.
 - Process-tree termination on Windows (job objects). The container backend is the only sandbox there.
-- MCP servers (M7) will run outside the run sandbox, started by the daemon with a scrubbed environment.
+- OAuth sign-in for remote MCP servers. A server that needs it can be used only with a token in a header.
 
 ## Outbound calls
 
-The daemon calls only the providers you configure, and the preview proxy calls only `127.0.0.1` on the selected run's port. Commands an agent runs can call anything the project's network setting allows.
+The daemon calls only the providers you configure and the MCP servers you add, and the preview proxy calls only `127.0.0.1` on the selected run's port. A stdio MCP server, being a program you installed, can call whatever it was written to call. Commands an agent runs can call anything the project's network setting allows.
 
 ## Reporting a problem
 

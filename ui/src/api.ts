@@ -10,6 +10,9 @@ import type { Budgets } from "./api/generated/Budgets";
 import type { CheckpointView } from "./api/generated/CheckpointView";
 import type { DiffView } from "./api/generated/DiffView";
 import type { MergeResult } from "./api/generated/MergeResult";
+import type { McpServerInput } from "./api/generated/McpServerInput";
+import type { McpServerView } from "./api/generated/McpServerView";
+import type { McpToolView } from "./api/generated/McpToolView";
 import type { NewProject } from "./api/generated/NewProject";
 import type { ProjectConfig } from "./api/generated/ProjectConfig";
 import type { ProjectView } from "./api/generated/ProjectView";
@@ -121,6 +124,13 @@ export const api = {
   readFile: (project: string, run: string | null, path: string) => call<FileContent>("GET", `/projects/${encodeURIComponent(project)}/file?${fileQuery(run, path)}`),
   writeFile: (project: string, run: string | null, path: string, content: string) => call<FileContent>("PUT", `/projects/${encodeURIComponent(project)}/file?${fileQuery(run, path)}`, { content }),
   fileDiff: (run: string, path: string) => call<FileDiffView>("GET", `/runs/${encodeURIComponent(run)}/diff/file?path=${encodeURIComponent(path)}`),
+  mcpServers: () => call<McpServerView[]>("GET", "/mcp"),
+  createMcpServer: (s: McpServerInput) => call<McpServerView>("POST", "/mcp", s),
+  updateMcpServer: (s: McpServerInput) => call<McpServerView>("PUT", `/mcp/${encodeURIComponent(s.id)}`, s),
+  deleteMcpServer: (id: string) => call("DELETE", `/mcp/${encodeURIComponent(id)}`),
+  /** Starts or reaches the server, so this can take a while or fail with the server's own error. */
+  mcpTools: (id: string) => call<McpToolView[]>("GET", `/mcp/${encodeURIComponent(id)}/tools`),
+  trustMcpTool: (id: string, tool: string, trusted: boolean) => call<McpServerView>("PUT", `/mcp/${encodeURIComponent(id)}/trust`, { tool, trusted }),
   preview: () => call<PreviewView>("GET", "/preview"),
   selectPreview: (runId: string | null) => call<PreviewView>("PUT", "/preview", { run_id: runId }),
   startPreview: () => call<PreviewView>("POST", "/preview/start", {}),

@@ -25,9 +25,14 @@ pub enum Decision {
 
 /// `command_allowed` says whether a command matched the project's allowlist.
 /// `sandboxed` says whether commands run contained; without containment every action is confirmed.
+///
+/// An MCP tool is decided by the owner's trust alone: the server runs outside the run's sandbox, so neither the
+/// mode nor the sandbox says anything about what it may do.
 pub fn decide(mode: PolicyMode, kind: ToolKind, command_allowed: bool, sandboxed: bool) -> Decision {
     let mode = if sandboxed { mode } else { PolicyMode::ConfirmAll };
     match (kind, mode) {
+        (ToolKind::External { trusted: true }, _) => Decision::Allow,
+        (ToolKind::External { trusted: false }, _) => Decision::Ask,
         (ToolKind::Read, _) => Decision::Allow,
         (_, PolicyMode::ConfirmAll) => Decision::Ask,
         (ToolKind::Edit, _) => Decision::Allow,
@@ -106,6 +111,16 @@ mod tests {
             assert_eq!(decide(mode, Edit, true, false), Ask);
             assert_eq!(decide(mode, Command, true, false), Ask);
             assert_eq!(decide(mode, Read, false, false), Allow);
+        }
+    }
+
+    #[test]
+    fn an_mcp_tool_asks_until_the_owner_trusts_it_in_every_mode() {
+        for mode in [ConfirmAll, AutoEdit, Autopilot] {
+            for sandboxed in [true, false] {
+                assert_eq!(decide(mode, External { trusted: false }, true, sandboxed), Ask);
+                assert_eq!(decide(mode, External { trusted: true }, false, sandboxed), Allow);
+            }
         }
     }
 

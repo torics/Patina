@@ -206,7 +206,8 @@ function ApprovalCard({ runId, item }: { runId: string; item: ToolItem }) {
   const [args, setArgs] = useState(JSON.stringify(item.args, null, 2));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  async function answer(action: "approve" | "deny" | "edit", allowPattern: string | null = null) {
+  const mcp = item.name.startsWith("mcp__");
+  async function answer(action: "approve" | "deny" | "edit", allowPattern: string | null = null, trust = false) {
     let edited: Record<string, any> | null = null;
     if (action === "edit") {
       try {
@@ -219,7 +220,7 @@ function ApprovalCard({ runId, item }: { runId: string; item: ToolItem }) {
     setBusy(true);
     setError(null);
     try {
-      await api.answerApproval(runId, item.approval!.id, { action, note: action === "deny" && note.trim() ? note.trim() : null, args: edited, allow_pattern: allowPattern });
+      await api.answerApproval(runId, item.approval!.id, { action, note: action === "deny" && note.trim() ? note.trim() : null, args: edited, allow_pattern: allowPattern, trust_tool: trust });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -231,6 +232,11 @@ function ApprovalCard({ runId, item }: { runId: string; item: ToolItem }) {
       <p>
         <strong>Waiting for your approval.</strong> Nothing is changed until you answer.
       </p>
+      {mcp && (
+        <p class="muted">
+          This tool belongs to an MCP server you added. The server runs outside the sandbox, and what it returns is data from outside Patina. It asks every time until you trust it.
+        </p>
+      )}
       <div class="row">
         <button onClick={() => answer("approve")} disabled={busy}>
           Approve
@@ -240,6 +246,14 @@ function ApprovalCard({ runId, item }: { runId: string; item: ToolItem }) {
           Deny
         </button>
       </div>
+      {mcp && (
+        <div class="row">
+          <button onClick={() => answer("approve", null, true)} disabled={busy}>
+            Approve and trust this tool
+          </button>
+          <span class="muted">It will run without asking, in this run and later ones. You can undo this in Settings.</span>
+        </div>
+      )}
       {command !== null && timeline.value.sandbox !== "none" && (
         <details>
           <summary>Always allow commands like this</summary>

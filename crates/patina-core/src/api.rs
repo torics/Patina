@@ -1,6 +1,7 @@
 //! Types that cross the HTTP API. The UI's TypeScript types are generated from these with ts-rs,
 //! so the two cannot drift. This crate does not embed the UI, so the export can run before the UI build.
 use crate::budget::{Budgets, Usage};
+use crate::mcp_config::McpTransport;
 use crate::policy::PolicyMode;
 use crate::project_config::ProjectConfig;
 use crate::provider_config::{Price, ProviderKind};
@@ -204,6 +205,9 @@ pub struct ApprovalAnswer {
     /// commands stop asking.
     #[serde(default)]
     pub allow_pattern: Option<String>,
+    /// With an approval of an MCP tool: also trust the tool, so that it stops asking, in this run and later ones.
+    #[serde(default)]
+    pub trust_tool: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -409,4 +413,100 @@ pub struct PreviewView {
 pub struct PreviewSelect {
     /// The run to preview, or null to stop previewing.
     pub run_id: Option<String>,
+}
+
+/// Where the value of an MCP server's environment variable or header comes from. The value itself is never shown.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum McpValueSource {
+    /// A stored, encrypted secret.
+    Secret,
+    /// A variable of the daemon's environment, named in `var`.
+    Env,
+    /// Text written into `mcp.toml` by hand.
+    Literal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct McpValueView {
+    pub name: String,
+    pub source: McpValueSource,
+    pub var: Option<String>,
+}
+
+/// An MCP server as the API shows it.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct McpServerView {
+    pub id: String,
+    pub transport: McpTransport,
+    pub command: Option<String>,
+    pub args: Vec<String>,
+    pub cwd: Option<String>,
+    pub url: Option<String>,
+    pub env: Vec<McpValueView>,
+    pub headers: Vec<McpValueView>,
+    pub trusted_tools: Vec<String>,
+    pub timeout_s: u32,
+    pub enabled: bool,
+    /// Whether the daemon holds an open connection to it now.
+    pub connected: bool,
+}
+
+/// An environment variable or header to set. `value` is `env:<VAR>` to take a variable of the daemon's
+/// environment; any other text is stored as an encrypted secret. Empty or absent keeps the value it has.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct McpValueInput {
+    pub name: String,
+    #[serde(default)]
+    pub value: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct McpServerInput {
+    pub id: String,
+    #[serde(default)]
+    pub transport: McpTransport,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub env: Vec<McpValueInput>,
+    #[serde(default)]
+    pub headers: Vec<McpValueInput>,
+    #[serde(default)]
+    pub trusted_tools: Vec<String>,
+    #[serde(default)]
+    pub timeout_s: Option<u32>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
+/// A tool an MCP server offers.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct McpToolView {
+    /// The server's own name for it.
+    pub name: String,
+    /// The name a model and an agent's `tools` list use.
+    pub exposed: String,
+    pub description: String,
+    pub trusted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct McpTrustInput {
+    /// The server's own name for the tool, or `*` for every tool of the server.
+    pub tool: String,
+    pub trusted: bool,
 }

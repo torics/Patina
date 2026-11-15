@@ -12,6 +12,8 @@ pub enum ToolKind {
     Edit,
     /// Runs a command.
     Command,
+    /// A tool of an MCP server. It runs outside the sandbox, so it asks every time unless the owner trusts it.
+    External { trusted: bool },
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]

@@ -5,6 +5,7 @@ pub mod changes;
 pub mod engine;
 pub mod error;
 pub mod files;
+pub mod mcp;
 pub mod preview;
 pub mod projects;
 pub mod runs;
@@ -69,6 +70,10 @@ pub fn router(st: Arc<AppState>) -> Router {
         .route("/projects/{id}", axum::routing::patch(projects::update).delete(projects::delete))
         .route("/projects/{id}/tree", get(files::tree))
         .route("/projects/{id}/file", get(files::read).put(files::write))
+        .route("/mcp", get(mcp::list).post(mcp::create))
+        .route("/mcp/{id}", put(mcp::update).delete(mcp::delete))
+        .route("/mcp/{id}/tools", get(mcp::tools))
+        .route("/mcp/{id}/trust", put(mcp::trust))
         .route("/preview", get(preview::get).put(preview::select))
         .route("/preview/start", post(preview::start))
         .route("/preview/stop", post(preview::stop))

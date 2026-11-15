@@ -161,6 +161,27 @@
 - CodeMirror 6, as section 4 names it: `@codemirror/state`, `view`, `commands`, `language`, `search`, `merge`, `@lezer/highlight`, and the languages JavaScript and TypeScript, JSON, Rust, Python, Markdown, CSS and HTML. Exact versions, all over two weeks old. Loaded on demand.
 - `reqwest` with `stream` in `patina-server`, for the preview proxy. It was already in the binary for providers.
 
+## M7 choices
+- **Client.** `rmcp` 3.10, the official Rust SDK, with client features only: `client`, `transport-child-process`, `transport-streamable-http-client-reqwest` and its rustls `reqwest` feature. No server, macros or OAuth code is in the binary. The connection uses the `initialize` handshake (rmcp's default), which every server in use today accepts; the newer `server/discover` start is not tried.
+- **`mcp.toml`.** One `[[server]]` per server: `id`, `transport` (`stdio` or `http`), `command`, `args`, `cwd`, `env` for stdio, `url`, `headers` for HTTP, `trusted_tools`, `timeout_s` (120 by default, at most 600) and `enabled`. Server ids are at most 32 characters and may not contain `__`, so a tool name splits back into server and tool unambiguously.
+- **Tool names.** A model sees `mcp__<server>__<tool>`. Characters a model API refuses become `_`, and the name is cut at 64 characters; a tool whose cleaned name clashes with an earlier one of the same server is left out with a warning.
+- **Per-agent opt-in** reuses the agent's `tools` list: `mcp__<server>` grants every tool of a server, `mcp__<server>__<tool>` one tool. MCP tools work without a project, in a plain chat.
+- **Trust.** A new `ToolKind::External { trusted }`. The policy decides it by trust alone: an untrusted MCP tool asks in every mode, including Autopilot, and a trusted one never asks, also without a sandbox, because the sandbox never contained it. Trust is per tool, by the server's own tool name, stored in `trusted_tools` (`*` for all). It is read at each call, so trusting a tool from the approval card ("Approve and trust this tool", `trust_tool` on the answer) applies to the run at once. Settings lists the tools with a trust checkbox.
+- **One connection per server, shared by all runs.** `McpHub` connects on first use and reconnects when the connection closed or the server's settings changed. A failed call is not retried, since a tool may have side effects; the next call reconnects.
+- **Starting a run.** The MCP servers an agent names are reached before the run is created. If one cannot be reached, the run does not start (502 `mcp_unavailable`, naming the server). A missing or disabled server gives no tools, with a warning in the log. The same applies on resume.
+- **Stdio servers** get an empty environment plus `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `TZ` and `TMPDIR` (on Windows: `PATH`, `PATHEXT`, `SystemRoot`, `SystemDrive`, `ComSpec`, `TEMP`, `TMP`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `ProgramData`, `ProgramFiles`, `USERNAME`), and the server's `env`. A server without `PATH` and `HOME` could not start `npx` or `uvx`, which most servers use. Each runs in its own process group (a job object on Windows). Ending a connection closes its input, waits two seconds as the protocol asks, then sends SIGTERM and SIGKILL to what is left of the group, so a child the server started does not outlive it. Its error output is kept (the last 4 KB) to explain a failed start.
+- **Values.** `env` and `headers` values are literal text, `env:<VAR>` or `secret:<name>`. Anything typed in the UI that is not `env:` is stored as the secret `mcp/<server>/<name>`, so tokens never land in `mcp.toml` in clear text, and the API shows only names and sources. Secrets no longer used are deleted on save and with the server. Headers the transport owns (`Accept`, `Mcp-Session-Id` and others) are refused.
+- **Results.** Text content is passed on; images, audio and binary resources are described in one line; embedded text resources are included with their URI; with no content, `structuredContent` is passed as JSON. Each result starts with a line saying it comes from outside Patina and is data, not instructions. The loop's usual 30 KB cut applies. `isError` makes the result an error for the model.
+- **Schemas.** The server's input schema is passed on as given, without `$schema`, and with `type: object` and `properties` added when missing. Patina's argument check validates the subset it knows and ignores the rest.
+- **Not in v1:** MCP resources, prompts, sampling and elicitation (a server that asks for them gets rmcp's default refusal); OAuth for remote servers; the legacy SSE transport.
+- **Tests.** The client is tested against a stdio server written in Python without any MCP library (`crates/patina-tools/tests/fixtures/mcp_stdio_server.py`, speaking protocol 2025-06-18) and a Streamable HTTP server made with rmcp's own server side, in-process. CI's Ubuntu image has Python; the stdio tests skip with a message where it is missing. A browser test drives the whole flow from Settings to a trusted second call.
+
+## M7 dependencies (stripped release binary: 14.2 MB, up from 12.1 MB; idle memory 11.2 MB; UI first load 34.6 KB gzipped, all assets 271 KB)
+- `rmcp` 3.10 (Apache-2.0), client features only, as section 4 names it. Most of the size increase is its protocol model.
+- `process-wrap` 10 (Apache-2.0 or MIT), already a dependency of rmcp's stdio transport, used directly to start a server in its own process group or job object.
+- `http` 1, already in the tree, for header names and values.
+- Test only: rmcp's server side and macros, to run a Streamable HTTP server in the tests. Not in the binary.
+
 ## Open risks
 - rustls uses aws-lc-rs, which needs a C toolchain when cross-compiling. Check static musl builds early in M8, and switch to the ring provider if needed.
 - Live checks passed on 2026-11-15 for Gemini (streaming, a tool call, reasoning replay) and for a hosted OpenAI-compatible endpoint (Meta's Muse API: streaming and a tool call). Anthropic, OpenAI and a local endpoint have not been checked live yet.
@@ -176,3 +197,7 @@
 - The preview proxy has no WebSocket support, so dev servers' hot reload does not reach the frame. Pages that need their origin (storage, cookies, service workers) do not work in the sandboxed frame; "Open in a new tab" shows them unsandboxed on the preview origin.
 - A preview container left behind by a crash is not removed on restart; `docker rm -f patina-<run>-preview` does it.
 - Under the container backend, a dev server must listen on all of the container's addresses (for example `--host 0.0.0.0`) to be reachable through the published port.
+- MCP is tested against a hand-written stdio server and rmcp's own HTTP server, not yet against third-party servers or a real model choosing MCP tools. Gemini rejects some JSON Schema keywords; a server whose schema uses them may fail with that provider.
+- A stdio MCP server's own children that leave its process group are not stopped with it, and on Windows the job object is untested.
+- The binary grew by 2.1 MB with the MCP client. `cargo bloat` in M8 should check what can be trimmed.
+

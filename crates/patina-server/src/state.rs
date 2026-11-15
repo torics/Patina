@@ -68,6 +68,8 @@ pub struct AppState {
     pub identity: String,
     /// The preview listener's state: the selected run, each run's port, and the dev command Patina started.
     pub preview: crate::preview::Preview,
+    /// Connections to the MCP servers in `mcp.toml`, shared by every run.
+    pub mcp: Arc<patina_tools::mcp::McpHub>,
     caps: tokio::sync::OnceCell<Caps>,
     providers: Mutex<Option<(SystemTime, ProvidersFile)>>,
     registry: Mutex<HashMap<String, CachedProvider>>,
@@ -75,7 +77,12 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(paths: Paths, config: Config, db: Db, secrets: Secrets, factory: ProviderFactory) -> Arc<AppState> {
+        let mcp = patina_tools::mcp::McpHub::new(Arc::new(crate::mcp::ConfigSource {
+            path: paths.config_dir.join("mcp.toml"),
+            secrets: secrets.clone(),
+        }));
         Arc::new(AppState {
+            mcp,
             paths,
             config,
             db,

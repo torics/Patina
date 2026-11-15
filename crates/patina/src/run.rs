@@ -232,6 +232,7 @@ pub fn ask(input: &mut dyn BufRead, out: &mut dyn Write, payload: &Value) -> std
         note,
         args,
         allow_pattern: None,
+        trust_tool: false,
     };
     loop {
         write!(out, "[a]pprove, [d]eny, or [e]dit the arguments? ")?;
@@ -358,6 +359,7 @@ pub async fn run(paths: Paths, args: RunArgs) -> Result<u8> {
                 note: None,
                 args: None,
                 allow_pattern: None,
+                trust_tool: false,
             };
             match engine::answer_approval(&st, &row.id, &approval_id, yes).await {
                 Ok(()) => {}
@@ -383,6 +385,8 @@ pub async fn run(paths: Paths, args: RunArgs) -> Result<u8> {
         }
     }
     on_interrupt.abort();
+    // The MCP servers this command started end with it.
+    st.mcp.close_all().await;
 
     let done = runs::load(&st, &row.id).await.map_err(api)?;
     if !args.json

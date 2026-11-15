@@ -91,6 +91,12 @@ The file routes (`/projects/:id/tree` and `/projects/:id/file`, with `?run=` for
 
 `patina-server::preview` runs a second axum listener on loopback. It holds the selected run, a port per run (picked once, kept for the daemon's lifetime), and the dev command the owner started, which runs in a sandbox built like the run's own. Requests are streamed to `127.0.0.1:<port>` with `reqwest`, without cookies or Patina headers, and responses come back without `Set-Cookie` or CORS headers. The run's sandbox setup carries the port, so commands get `PORT`, Landlock allows binding exactly that port when TCP is blocked, and the container publishes it on loopback.
 
+## MCP
+
+`patina-tools::mcp` is the client, on `rmcp` with client features only. `McpHub` holds one connection per server, shared by every run and made on first use: a child process over stdio (in its own process group, with a scrubbed environment) or Streamable HTTP over `reqwest`. A connection is made again when it closed or its settings changed. `McpTool` wraps one tool of a server as an agent `Tool` of kind `External { trusted }`; trust is read from `mcp.toml` at each call, so trusting a tool applies to a run already going. The policy decides an external tool by trust alone.
+
+`patina-server::mcp` reads `mcp.toml`, resolves `env:` and `secret:` values for the hub, and serves the settings routes. When a run starts or resumes, `engine::resolve` gives each agent the MCP tools its `tools` list grants (`mcp__<server>` or `mcp__<server>__<tool>`); a server that cannot be reached stops the run before it starts.
+
 ## UI
 
 Preact with signals. CodeMirror 6 provides the editor and the per-file diff; it is loaded on demand and mounted in a shadow root so its styles need no `unsafe-inline`. `ui/src/reducer.ts` is a pure function from events to the timeline, and is unit tested. `ui/src/policy.ts` previews the allowlist as the daemon applies it, also unit tested. `ui/dist` is embedded with `rust-embed`.

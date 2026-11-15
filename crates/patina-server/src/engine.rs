@@ -13,6 +13,7 @@ use patina_core::agent_config::AgentConfig;
 use patina_core::api::{ApprovalAction, ApprovalAnswer, NewRun};
 use patina_core::budget::{BudgetTracker, Budgets, Usage};
 use patina_core::events::{EventType, RunStatus, new_id, now_ms};
+use patina_core::mcp_config::{McpGrant, grant_of, granted, servers_named};
 use patina_core::policy::PolicyMode;
 use patina_core::project_config::ProjectConfig;
 use patina_core::provider::{ChatProvider, Message, Part, Role};
@@ -276,6 +277,38 @@ struct Resolved {
     config: AgentConfig,
     profile: ProviderProfile,
     provider: Arc<dyn ChatProvider>,
+    /// The MCP tools its `tools` list grants it. They need no project.
+    mcp: Vec<Arc<dyn Tool>>,
+}
+
+/// The MCP tools an agent's `tools` list grants it. A server that is not configured, or is disabled, gives none.
+/// One that cannot be reached stops the run before it starts: an agent never runs without a tool it was given.
+async fn mcp_tools(st: &AppState, agent: &AgentConfig) -> ApiResult<Vec<Arc<dyn Tool>>> {
+    let servers = servers_named(&agent.tools);
+    if servers.is_empty() {
+        return Ok(vec![]);
+    }
+    let file = st.mcp_file()?;
+    let mut out = vec![];
+    for server in servers {
+        if !file.get(server).is_some_and(|s| s.enabled) {
+            tracing::warn!(agent = %agent.id, server, "the agent names an MCP server that is missing or disabled; it gets none of its tools");
+            continue;
+        }
+        let tools = st
+            .mcp
+            .tools(server, |exposed| granted(&agent.tools, server, exposed))
+            .await
+            .map_err(|e| {
+                ApiError::new(
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    "mcp_unavailable",
+                    format!("MCP server {server:?}, which agent {:?} uses, could not be reached: {e}", agent.id),
+                )
+            })?;
+        out.extend(tools);
+    }
+    Ok(out)
 }
 
 /// The team a run executes and every agent it may reach, each with a working provider. `who` is `agent:<id>` or
@@ -311,12 +344,19 @@ async fn resolve(st: &AppState, who: &str, resuming: bool) -> ApiResult<(Team, V
             continue;
         };
         let (profile, provider) = st.provider(&config.provider).await?;
-        out.push(Resolved { config, profile, provider });
+        let mcp = mcp_tools(st, &config).await?;
+        out.push(Resolved {
+            config,
+            profile,
+            provider,
+            mcp,
+        });
     }
     Ok((team, out))
 }
 
-/// The roster of a run: each agent with the tools its file names, over the run's workspace and commands.
+/// The roster of a run: each agent with the tools its file names, over the run's workspace and commands, and
+/// the MCP tools it was granted.
 fn roster_of(agents: Vec<Resolved>, workspace: Option<(&Arc<Workspace>, &Arc<Commands>)>) -> Roster {
     let mut roster = Roster::default();
     for r in agents {
@@ -331,6 +371,7 @@ fn roster_of(agents: Vec<Resolved>, workspace: Option<(&Arc<Workspace>, &Arc<Com
                 tools.extend(command_tools(commands.clone()));
             }
         }
+        tools.extend(r.mcp);
         roster.insert(Member {
             spec: spec_of(&r.config, r.profile.prices.get(&r.config.model).cloned()),
             role: r.config.role.clone(),
@@ -968,6 +1009,7 @@ pub async fn shutdown(st: &AppState, limit: Duration) {
     while !st.runs.lock().unwrap().is_empty() && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    st.mcp.close_all().await;
 }
 
 /// Retention: remove the logs and saved outputs of runs that ended more than `retention_days` ago.
@@ -1114,6 +1156,30 @@ fn allow_pattern(answer: &ApprovalAnswer, tool_name: &str) -> ApiResult<Option<S
     Ok(Some(pattern.to_string()))
 }
 
+/// The MCP server and tool, by the server's name for it, that the owner asked to trust while approving.
+async fn trust_target(st: &AppState, answer: &ApprovalAnswer, tool_name: &str) -> ApiResult<Option<(String, String)>> {
+    if !answer.trust_tool {
+        return Ok(None);
+    }
+    if answer.action == ApprovalAction::Deny {
+        return Err(ApiError::bad_request("a tool can be trusted only when approving"));
+    }
+    let Some(McpGrant::Tool { server, exposed }) = grant_of(tool_name) else {
+        return Err(ApiError::bad_request("only an MCP tool can be trusted"));
+    };
+    let conn = st
+        .mcp
+        .connection(server)
+        .await
+        .map_err(|e| ApiError::conflict("mcp_unavailable", format!("the tool cannot be trusted now: {e}")))?;
+    let tool = conn
+        .tools()
+        .iter()
+        .find(|t| t.exposed == exposed)
+        .ok_or_else(|| ApiError::conflict("mcp_unavailable", "the MCP server no longer offers this tool"))?;
+    Ok(Some((server.to_string(), tool.name.clone())))
+}
+
 /// Add a pattern to the allowlist of the run's project. Saved before the answer is delivered: if the file cannot
 /// be written, nothing was approved and the owner can answer again.
 async fn save_pattern(st: &AppState, run_id: &str, pattern: &str) -> ApiResult<()> {
@@ -1153,6 +1219,7 @@ pub async fn answer_approval(st: &Arc<AppState>, run_id: &str, approval_id: &str
         },
     };
     let pattern = allow_pattern(&answer, row.tool_call["name"].as_str().unwrap_or(""))?;
+    let trust = trust_target(st, &answer, row.tool_call["name"].as_str().unwrap_or("")).await?;
     let status = if answer.action == ApprovalAction::Deny {
         "denied"
     } else {
@@ -1170,6 +1237,9 @@ pub async fn answer_approval(st: &Arc<AppState>, run_id: &str, approval_id: &str
         }
         if let Some(pattern) = &pattern {
             save_pattern(st, run_id, pattern).await?;
+        }
+        if let Some((server, tool)) = &trust {
+            crate::mcp::set_trust(st, server, tool, true).await?;
         }
         if !approvals::resolve(&st.db, approval_id, status, &record).await? {
             return Err(ApiError::conflict("already_answered", "this approval was already answered"));
@@ -1189,11 +1259,14 @@ pub async fn answer_approval(st: &Arc<AppState>, run_id: &str, approval_id: &str
             ..e
         });
     };
-    if pattern.is_some() && !handle.pending.lock().unwrap().contains_key(approval_id) {
+    if (pattern.is_some() || trust.is_some()) && !handle.pending.lock().unwrap().contains_key(approval_id) {
         return Err(ApiError::conflict("not_active", "the run is no longer waiting for this approval"));
     }
     if let Some(pattern) = &pattern {
         save_pattern(st, run_id, pattern).await?;
+    }
+    if let Some((server, tool)) = &trust {
+        crate::mcp::set_trust(st, server, tool, true).await?;
     }
     let sender = handle
         .pending

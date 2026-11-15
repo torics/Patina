@@ -3,6 +3,7 @@ import type { AgentConfig } from "./api/generated/AgentConfig";
 import type { Budgets } from "./api/generated/Budgets";
 import type { ApprovalView } from "./api/generated/ApprovalView";
 import type { Event } from "./api/generated/Event";
+import type { McpServerView } from "./api/generated/McpServerView";
 import type { ProjectView } from "./api/generated/ProjectView";
 import type { ProviderView } from "./api/generated/ProviderView";
 import type { RunView } from "./api/generated/RunView";
@@ -23,6 +24,7 @@ export const templates = signal<TemplateView[]>([]);
 export const projects = signal<ProjectView[]>([]);
 /** Names of the tools an agent can be given, as the daemon reports them. */
 export const toolNames = signal<string[]>([]);
+export const mcpServers = signal<McpServerView[]>([]);
 /** What the daemon's host can contain commands with, as it was detected. */
 export const sandbox = signal<SandboxStatus | null>(null);
 /** Days after which the logs of finished runs are removed; 0 keeps them. */
@@ -111,8 +113,8 @@ export async function enter() {
 }
 
 export async function refresh() {
-  const [p, a, t, tpl, r, pr, sys] = await Promise.all([api.providers(), api.agents(), api.teams(), api.templates(), api.runs(), api.projects(), api.system()]);
-  [providers.value, agents.value, teams.value, templates.value, runs.value, projects.value] = [p, a, t, tpl, r, pr];
+  const [p, a, t, tpl, r, pr, sys, mcp] = await Promise.all([api.providers(), api.agents(), api.teams(), api.templates(), api.runs(), api.projects(), api.system(), api.mcpServers()]);
+  [providers.value, agents.value, teams.value, templates.value, runs.value, projects.value, mcpServers.value] = [p, a, t, tpl, r, pr, mcp];
   [toolNames.value, sandbox.value, retentionDays.value] = [sys.tools, sys.sandbox, sys.retention_days];
   [previewPort.value, previewOrigin.value] = [sys.preview_port, sys.preview_origin];
   if (currentProject.value && !pr.some((x) => x.id === currentProject.value)) chooseProject("");

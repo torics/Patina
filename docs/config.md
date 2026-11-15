@@ -50,7 +50,7 @@ tools = ["list_files", "read_file", "search", "edit_file", "write_file", "run_co
 can_delegate_to = []
 ```
 
-`tools` lists what the agent may use in a run that has a project: `list_files`, `read_file`, `search`, `edit_file`, `write_file`, `run_command`. `run_command` brings `process_output` and `stop_process` for background processes. An empty list means the agent can only talk.
+`tools` lists what the agent may use in a run that has a project: `list_files`, `read_file`, `search`, `edit_file`, `write_file`, `run_command`. `run_command` brings `process_output` and `stop_process` for background processes. It also grants MCP tools, with or without a project: `mcp__<server>` for every tool of a server in `mcp.toml`, or `mcp__<server>__<tool>` for one tool, by the name the model sees. An empty list means the agent can only talk.
 
 `role` (optional) is one line that other agents see: in the `delegate` tool's list and in hand-offs. `can_delegate_to` names agents this one may hand tasks to with the `delegate` tool (see teams below).
 
@@ -128,3 +128,35 @@ PATH = "/home/you/.nvm/versions/node/v22.11.0/bin:/usr/local/bin:/usr/bin:/bin"
 Package caches are private to each run, because `HOME` is. To share one, set its location with `env` and open it with `sandbox_write`. Git commands do not work on the run's own repository inside a command: Patina commits the agent's changes itself.
 
 Run `patina doctor` to see which sandbox each project gets on this machine.
+
+## mcp.toml
+
+MCP servers whose tools agents may use. See `docs/mcp.md` for how they run and how trust works.
+
+```toml
+schema_version = 1
+
+[[server]]
+id = "search"                 # letters, digits, - and _, up to 32, no "__"
+transport = "stdio"           # stdio (default) | http
+command = "npx"
+args = ["-y", "some-search-mcp-server"]
+cwd = "/home/me"              # optional
+env = { API_KEY = "secret:mcp/search/API_KEY", HTTPS_PROXY = "env:HTTPS_PROXY" }
+trusted_tools = ["search"]    # run without asking; "*" trusts every tool of the server
+timeout_s = 120               # the longest one call may take, 1 to 600
+enabled = true
+
+[[server]]
+id = "tracker"
+transport = "http"
+url = "https://mcp.example.com/mcp"
+headers = { Authorization = "secret:mcp/tracker/Authorization" }
+```
+
+- `command`, `args`, `cwd` and `env` are for `stdio`; `url` and `headers` are for `http`.
+- A value in `env` or `headers` is literal text, `env:<VAR>` (the daemon's own variable, read when the server starts) or `secret:<name>` (a stored secret). The UI stores what you type as `secret:mcp/<server>/<name>`, so a token never lands in this file.
+- A stdio server gets only `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `TZ` and `TMPDIR` from the daemon (on Windows, the variables a program needs to start), plus its `env`.
+- Headers the transport sets (`Accept`, `Content-Type`, `Mcp-Session-Id`, `Mcp-Protocol-Version`, `Last-Event-Id` and a few more) cannot be set here.
+- A change applies on the server's next use: a server whose settings changed is restarted, and a removed or disabled one is stopped.
+

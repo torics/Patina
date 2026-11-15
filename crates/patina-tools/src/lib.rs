@@ -3,6 +3,7 @@ pub mod command;
 pub mod confine;
 pub mod files;
 pub mod git;
+pub mod mcp;
 pub mod process;
 pub mod sandbox;
 pub mod setup;

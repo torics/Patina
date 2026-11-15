@@ -8,6 +8,7 @@ pub mod budget;
 pub mod compact;
 pub mod config;
 pub mod events;
+pub mod mcp_config;
 pub mod paths;
 pub mod policy;
 pub mod project_config;

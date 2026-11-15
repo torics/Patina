@@ -221,9 +221,11 @@ pub(crate) fn check_agent(st: &AppState, a: &AgentConfig) -> ApiResult<()> {
         return Err(ApiError::bad_request(format!("provider {:?} does not exist", a.provider)));
     }
     let known = patina_tools::tool_names();
-    if let Some(unknown) = a.tools.iter().find(|t| !known.contains(&t.as_str())) {
+    // MCP tools are named `mcp__<server>` or `mcp__<server>__<tool>`; the server may be configured later.
+    let mcp = |t: &str| patina_core::mcp_config::grant_of(t).is_some();
+    if let Some(unknown) = a.tools.iter().find(|t| !known.contains(&t.as_str()) && !mcp(t)) {
         return Err(ApiError::bad_request(format!(
-            "unknown tool {unknown:?}; the tools are {}",
+            "unknown tool {unknown:?}; the tools are {}, and MCP tools named mcp__<server> or mcp__<server>__<tool>",
             known.join(", ")
         )));
     }

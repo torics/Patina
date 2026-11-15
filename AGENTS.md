@@ -21,4 +21,7 @@
 - Anything a run does that must survive a restart is written before it takes effect: the approval row before the event, `delivered` before the call runs, usage with every `usage` event.
 - File routes for the editor go through `Workspace` like the tools, and a save in a run's worktree goes through `git::checkpoint`, never a plain commit.
 - The preview's dev command is the one process Patina starts in a worktree for the owner. It gets its sandbox from `engine::sandbox_for`, like the run's commands. The preview proxy must never forward cookies or `X-Patina-*` headers, nor return `Set-Cookie` or CORS headers.
+- MCP servers are started only through `patina-tools::mcp::McpHub`, never per run, and never with the daemon's environment: `BASE_ENV` plus the server's own `env` is all a stdio server gets.
+- An MCP tool's kind is `ToolKind::External`; the policy decides it by trust alone. Never let a mode, an allowlist or the sandbox state skip its question.
+- Values for MCP servers typed in the UI are stored as secrets (`secret:mcp/<server>/<name>`); no API response carries their values.
 - The CSP has no `unsafe-inline`. A library that injects `<style>` elements must be mounted in a shadow root (see `ui/src/cm.ts`).

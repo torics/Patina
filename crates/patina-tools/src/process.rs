@@ -101,14 +101,14 @@ pub fn spawn(p: &Prepared, marker: &str) -> std::io::Result<Running> {
 }
 
 #[cfg(unix)]
-fn signal_group(pid: u32, signal: rustix::process::Signal) {
+pub(crate) fn signal_group(pid: u32, signal: rustix::process::Signal) {
     if let Some(pid) = rustix::process::Pid::from_raw(pid as i32) {
         let _ = rustix::process::kill_process_group(pid, signal);
     }
 }
 
 #[cfg(unix)]
-fn group_alive(pid: u32) -> bool {
+pub(crate) fn group_alive(pid: u32) -> bool {
     rustix::process::Pid::from_raw(pid as i32).is_some_and(|p| rustix::process::test_kill_process_group(p).is_ok())
 }
 

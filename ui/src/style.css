@@ -59,6 +59,7 @@ code { font: 13px ui-monospace, monospace; }
 details { margin: .5rem 0; } summary { cursor: pointer; color: var(--muted); }
 fieldset { border: 1px solid var(--line); border-radius: 6px; margin: 0 0 .75rem; padding: .5rem .75rem; } legend { color: var(--muted); font-size: .9rem; }
 label.check { display: flex; gap: .5rem; align-items: center; margin: .25rem 0; color: var(--text); } label.check input { width: auto; }
+.indent { margin-left: 1.6rem; } .mcp-pick + .mcp-pick { margin-top: .5rem; } pre.error { white-space: pre-wrap; font-size: .85em; }
 .row select { width: auto; } .row label { margin: 0; }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 0 .75rem; }
 .tool { border-left: 3px solid var(--line); padding: .25rem 0 .25rem .75rem; margin: .6rem 0; }
