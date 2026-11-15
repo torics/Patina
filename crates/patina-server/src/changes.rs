@@ -27,10 +27,10 @@ fn git_err(e: GitError) -> ApiError {
     }
 }
 
-/// Where the run's commits can be read: its worktree while that exists, otherwise its branch in the repository.
+/// Where the run's commits are read: its branch in the project's repository. The worktree is never read for
+/// this, because its content belongs to the agent.
 struct Source {
-    dir: PathBuf,
-    target: String,
+    repo: PathBuf,
     base: String,
     branch: String,
 }
@@ -43,20 +43,11 @@ fn source(st: &AppState, run: &store::RunRow) -> ApiResult<Source> {
         };
         return Err(ApiError::conflict("no_changes", why));
     };
-    match &run.worktree_path {
-        Some(w) => Ok(Source {
-            dir: PathBuf::from(w),
-            target: "HEAD".into(),
-            base,
-            branch,
-        }),
-        None => Ok(Source {
-            dir: PathBuf::from(st.project(&run.project_id)?.path),
-            target: branch.clone(),
-            base,
-            branch,
-        }),
-    }
+    Ok(Source {
+        repo: PathBuf::from(st.project(&run.project_id)?.path),
+        base,
+        branch,
+    })
 }
 
 /// Changes may be rolled back, merged or discarded only while no agent is working in the worktree.
@@ -75,7 +66,7 @@ pub struct DiffQuery {
 pub async fn diff(State(st): St, Path(id): Path<String>, Query(q): Query<DiffQuery>) -> ApiResult<Response> {
     let run = load(&st, &id).await?;
     let src = source(&st, &run)?;
-    let text = git::diff(&src.dir, &src.base, &src.target).await.map_err(git_err)?;
+    let text = git::diff(&src.repo, &src.base, &src.branch).await.map_err(git_err)?;
     if q.format.as_deref() == Some("patch") {
         // A plain patch file that `git apply` accepts.
         let name = format!("attachment; filename=\"{}.patch\"", src.branch.replace('/', "-"));
@@ -88,7 +79,7 @@ pub async fn diff(State(st): St, Path(id): Path<String>, Query(q): Query<DiffQue
         )
             .into_response());
     }
-    let files = git::changed_files(&src.dir, &src.base, &src.target)
+    let files = git::changed_files(&src.repo, &src.base, &src.branch)
         .await
         .map_err(git_err)?
         .into_iter()
@@ -138,7 +129,8 @@ pub async fn rollback(State(st): St, Path(id): Path<String>, Json(input): Json<R
             .map(|c| c.commit_sha.clone())
             .ok_or_else(|| ApiError::not_found("checkpoint"))?
     };
-    git::rollback(&worktree, &commit).await.map_err(git_err)?;
+    let repo = PathBuf::from(st.project(&run.project_id)?.path);
+    git::rollback(&repo, &worktree, &commit).await.map_err(git_err)?;
     store::drop_checkpoints_after(&st.db, &id, input.step as i64).await?;
     store::append_event(
         &st.db,
@@ -164,6 +156,16 @@ pub async fn rollback(State(st): St, Path(id): Path<String>, Json(input): Json<R
     checkpoints(State(st), Path(id)).await
 }
 
+/// Remove the home and temp folders the run's commands had. They go when the worktree goes.
+fn forget_sandbox(st: &AppState, run_id: &str) {
+    let dir = st.sandbox_dir(run_id);
+    if let Err(e) = std::fs::remove_dir_all(&dir)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(dir = %dir.display(), error = %e, "could not remove a run's sandbox folders");
+    }
+}
+
 /// Merge the run branch into the branch checked out in the owner's repository, then clean up.
 pub async fn merge(State(st): St, Path(id): Path<String>) -> ApiResult<Json<MergeResult>> {
     let run = load(&st, &id).await?;
@@ -180,6 +182,7 @@ pub async fn merge(State(st): St, Path(id): Path<String>) -> ApiResult<Json<Merg
         git::remove_worktree(&repo, &PathBuf::from(w)).await.map_err(git_err)?;
     }
     git::delete_branch(&repo, &branch).await.map_err(git_err)?;
+    forget_sandbox(&st, &id);
     store::set_disposition(&st.db, &id, "merged", false).await?;
     let result = match merged {
         Merged::FastForward => "fast_forward",
@@ -207,6 +210,7 @@ pub async fn discard(State(st): St, Path(id): Path<String>, Json(input): Json<Di
     if !input.keep_branch {
         git::delete_branch(&repo, &branch).await.map_err(git_err)?;
     }
+    forget_sandbox(&st, &id);
     store::set_disposition(&st.db, &id, if input.keep_branch { "kept" } else { "discarded" }, input.keep_branch).await?;
     Ok(Json(view(&st, load(&st, &id).await?)))
 }

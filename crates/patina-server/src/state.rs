@@ -1,6 +1,6 @@
 use crate::auth::Limiter;
 use crate::error::{ApiError, ApiResult};
-use patina_core::agent::ApprovalDecision;
+use patina_core::agent::{Allowlist, ApprovalDecision};
 use patina_core::agent_config::AgentConfig;
 use patina_core::budget::BudgetTracker;
 use patina_core::config::write_atomic;
@@ -11,6 +11,7 @@ use patina_core::provider_config::{ProviderProfile, ProvidersFile};
 use patina_core::{Config, Paths};
 use patina_providers::{GenaiProvider, Guarded};
 use patina_store::{Db, secrets::Secrets};
+use patina_tools::sandbox::Caps;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -46,6 +47,8 @@ pub struct RunHandle {
     pub budget: Arc<BudgetTracker>,
     /// Approval requests the run is waiting on, by approval id.
     pub pending: Mutex<HashMap<String, oneshot::Sender<ApprovalDecision>>>,
+    /// The project's command allowlist as this run sees it. A pattern added while approving lands here at once.
+    pub allow_commands: Allowlist,
 }
 
 pub struct AppState {
@@ -56,6 +59,9 @@ pub struct AppState {
     pub factory: ProviderFactory,
     pub limiter: Mutex<Limiter>,
     pub runs: Mutex<HashMap<String, Arc<RunHandle>>>,
+    /// The Patina binary, which holds the Landlock helper. Tests point it at the built binary.
+    pub helper: PathBuf,
+    caps: tokio::sync::OnceCell<Caps>,
     providers: Mutex<Option<(SystemTime, ProvidersFile)>>,
     registry: Mutex<HashMap<String, CachedProvider>>,
 }
@@ -70,9 +76,26 @@ impl AppState {
             factory,
             limiter: Mutex::new(Limiter::default()),
             runs: Mutex::default(),
+            helper: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("patina")),
+            caps: tokio::sync::OnceCell::new(),
             providers: Mutex::default(),
             registry: Mutex::default(),
         })
+    }
+
+    /// What sandboxing this host supports. Detected once, on first use.
+    pub async fn caps(&self) -> &Caps {
+        self.caps.get_or_init(Caps::detect).await
+    }
+
+    /// Fix the detected capabilities ahead of time. Returns false if they were already detected.
+    pub fn set_caps(&self, caps: Caps) -> bool {
+        self.caps.set(caps).is_ok()
+    }
+
+    /// The private home and temp folders of one run's commands.
+    pub fn sandbox_dir(&self, run_id: &str) -> PathBuf {
+        self.paths.data_dir.join("sandbox").join(run_id)
     }
 
     fn providers_path(&self) -> PathBuf {

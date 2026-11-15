@@ -138,7 +138,7 @@ impl Tool for ReadFile {
                 Ok(p) => p,
                 Err(e) => return ToolOutput::error(e.to_string()),
             };
-            let bytes = match std::fs::read(&path) {
+            let bytes = match ws.read(&path) {
                 Ok(b) => b,
                 Err(e) => return ToolOutput::error(format!("cannot read {rel:?}: {e}")),
             };
@@ -224,8 +224,9 @@ impl Tool for Search {
                 if !entry.file_type().is_some_and(|t| t.is_file()) {
                     continue;
                 }
-                // The walker does not follow symlinks, so every file here is really inside the workspace.
-                let Ok(bytes) = std::fs::read(entry.path()) else { continue };
+                // The walker does not follow symlinks, and neither does the read, so every file read here is
+                // really inside the workspace, also when something swaps a folder for a link meanwhile.
+                let Ok(bytes) = ws.read(entry.path()) else { continue };
                 if is_binary(&bytes) {
                     continue;
                 }
@@ -264,7 +265,7 @@ fn plan_edit(ws: &Workspace, args: &Value) -> Result<(std::path::PathBuf, String
     let rel = str_arg(args, "path");
     let (old, new) = (str_arg(args, "old_string"), str_arg(args, "new_string"));
     let path = ws.resolve(rel).map_err(|e| e.to_string())?;
-    let bytes = std::fs::read(&path).map_err(|e| format!("cannot read {rel:?}: {e}"))?;
+    let bytes = ws.read(&path).map_err(|e| format!("cannot read {rel:?}: {e}"))?;
     if is_binary(&bytes) {
         return Err(format!("{rel:?} is a binary file"));
     }
@@ -328,7 +329,7 @@ impl Tool for EditFile {
                 Ok(p) => p,
                 Err(e) => return ToolOutput::error(e),
             };
-            if let Err(e) = std::fs::write(&path, &new) {
+            if let Err(e) = ws.write(&path, new.as_bytes()) {
                 return ToolOutput::error(format!("cannot write {:?}: {e}", str_arg(&args, "path")));
             }
             ws.remember(&path, new.as_bytes());
@@ -337,6 +338,7 @@ impl Tool for EditFile {
                 content: format!("edited {} ({n} replacement{})", ws.display(&path), if n == 1 { "" } else { "s" }),
                 is_error: false,
                 changed_files: true,
+                summary: None,
             }
         })
         .await
@@ -363,7 +365,7 @@ impl Tool for WriteFile {
         tokio::task::spawn_blocking(move || {
             let rel = str_arg(&args, "path");
             let path = ws.resolve(rel).ok()?;
-            let old = std::fs::read(&path).unwrap_or_default();
+            let old = ws.read(&path).unwrap_or_default();
             if is_binary(&old) {
                 return Some(format!("(overwrites binary file {rel})"));
             }
@@ -386,12 +388,7 @@ impl Tool for WriteFile {
                 return ToolOutput::error(format!("{rel:?} is a folder"));
             }
             let existed = path.exists();
-            if let Some(parent) = path.parent()
-                && let Err(e) = std::fs::create_dir_all(parent)
-            {
-                return ToolOutput::error(format!("cannot create folders for {rel:?}: {e}"));
-            }
-            if let Err(e) = std::fs::write(&path, content) {
+            if let Err(e) = ws.write(&path, content.as_bytes()) {
                 return ToolOutput::error(format!("cannot write {rel:?}: {e}"));
             }
             ws.remember(&path, content.as_bytes());
@@ -404,6 +401,7 @@ impl Tool for WriteFile {
                 ),
                 is_error: false,
                 changed_files: true,
+                summary: None,
             }
         })
         .await

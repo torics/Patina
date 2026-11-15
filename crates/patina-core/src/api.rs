@@ -2,7 +2,9 @@
 //! so the two cannot drift. This crate does not embed the UI, so the export can run before the UI build.
 use crate::budget::{Budgets, Usage};
 use crate::policy::PolicyMode;
+use crate::project_config::ProjectConfig;
 use crate::provider_config::{Price, ProviderKind};
+use crate::sandbox::{SandboxLevel, SandboxStatus};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use ts_rs::TS;
@@ -110,6 +112,18 @@ pub struct NewRun {
     pub budgets: Option<Budgets>,
 }
 
+/// A project with what its sandbox setting means on this host.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ProjectView {
+    #[serde(flatten)]
+    pub config: ProjectConfig,
+    /// The sandbox this project's commands get here. `None` when the one it asks for is not available.
+    pub effective_sandbox: Option<SandboxLevel>,
+    /// Why the sandbox the project asks for is not available. Runs are refused while this is set.
+    pub sandbox_error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct NewProject {
@@ -162,6 +176,10 @@ pub struct ApprovalAnswer {
     #[serde(default)]
     #[ts(type = "Record<string, any> | null")]
     pub args: Option<serde_json::Value>,
+    /// With an approval of a command: also add this pattern to the project's allowlist, so that matching
+    /// commands stop asking.
+    #[serde(default)]
+    pub allow_pattern: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -225,7 +243,8 @@ pub struct SessionState {
 pub struct SystemInfo {
     pub version: String,
     pub git_version: Option<String>,
-    pub sandbox_level: String,
+    /// What contains commands on this host.
+    pub sandbox: SandboxStatus,
     /// Names of the tools an agent can be given.
     pub tools: Vec<String>,
 }

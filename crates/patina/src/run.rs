@@ -7,6 +7,7 @@ use patina_core::api::{ApprovalAction, ApprovalAnswer, NewProject, NewRun};
 use patina_core::budget::Budgets;
 use patina_core::events::Event;
 use patina_core::project_config::ProjectConfig;
+use patina_core::sandbox::SandboxLevel;
 use patina_server::error::ApiError;
 use patina_server::state::{AppState, Live};
 use patina_server::{engine, projects, runs};
@@ -107,7 +108,10 @@ impl Printer {
         }
         self.close_text(out)?;
         match ev.kind.as_str() {
-            "run_started" => writeln!(out, "[run] started, policy {}", s("policy"))?,
+            "run_started" => match p["sandbox"].as_str() {
+                Some(sandbox) => writeln!(out, "[run] started, policy {}, sandbox {sandbox}", s("policy"))?,
+                None => writeln!(out, "[run] started, policy {}", s("policy"))?,
+            },
             "agent_started" => writeln!(
                 out,
                 "[agent {}] model {} on {}",
@@ -174,7 +178,12 @@ pub fn ask(input: &mut dyn BufRead, out: &mut dyn Write, payload: &Value) -> std
     if let Some(diff) = payload["diff"].as_str() {
         writeln!(out, "{}", diff.trim_end())?;
     }
-    let answer = |action, note, args| ApprovalAnswer { action, note, args };
+    let answer = |action, note, args| ApprovalAnswer {
+        action,
+        note,
+        args,
+        allow_pattern: None,
+    };
     loop {
         write!(out, "[a]pprove, [d]eny, or [e]dit the arguments? ")?;
         out.flush()?;
@@ -212,10 +221,6 @@ pub fn ask(input: &mut dyn BufRead, out: &mut dyn Write, payload: &Value) -> std
 }
 
 pub async fn run(paths: Paths, args: RunArgs) -> Result<u8> {
-    if args.yes {
-        // `--yes` skips approvals, which is only safe inside a sandbox. This build has none yet.
-        bail!("--yes is accepted only when a sandbox is active, and no sandbox is active here; approve each step on the terminal instead");
-    }
     let cfg = patina_core::Config::load_or_create(&paths.config_file())?;
     let db = patina_store::Db::open(&paths.database_file())?;
     let key = patina_store::secrets::master_key(&paths.data_dir)?;
@@ -223,6 +228,16 @@ pub async fn run(paths: Paths, args: RunArgs) -> Result<u8> {
     let st = AppState::new(paths, cfg, db, secrets, patina_server::genai_factory());
 
     let project = project_for(&st, &args.project).await?;
+    if args.yes {
+        // `--yes` answers every question with yes, which is only safe where commands are contained.
+        let level = st.caps().await.resolve(project.sandbox, project.container_image.is_some());
+        if !level.is_ok_and(|l| l != SandboxLevel::None) {
+            bail!(
+                "--yes is accepted only when a sandbox is active, and project {:?} has none on this host (see `patina doctor`); approve each step on the terminal instead",
+                project.id
+            );
+        }
+    }
     let mut budgets = Budgets::default();
     if let Some(v) = args.max_steps {
         budgets.max_steps = v;
@@ -283,6 +298,21 @@ pub async fn run(paths: Paths, args: RunArgs) -> Result<u8> {
             continue;
         }
         let approval_id = ev.payload["approval_id"].as_str().unwrap_or("").to_string();
+        if args.yes {
+            // The sandbox was checked before the run started.
+            let yes = ApprovalAnswer {
+                action: ApprovalAction::Approve,
+                note: None,
+                args: None,
+                allow_pattern: None,
+            };
+            match engine::answer_approval(&st, &row.id, &approval_id, yes).await {
+                Ok(()) => {}
+                Err(e) if e.code == "not_active" || e.code == "already_answered" => {}
+                Err(e) => return Err(api(e)),
+            }
+            continue;
+        }
         if !interactive {
             // Nobody can answer, and answering on the owner's behalf would defeat the policy.
             unattended = true;
@@ -305,7 +335,7 @@ pub async fn run(paths: Paths, args: RunArgs) -> Result<u8> {
     if !args.json
         && let (Some(branch), Some(base), Some(worktree)) = (&done.branch, &done.base_commit, &done.worktree_path)
     {
-        let changed = patina_tools::git::changed_files(std::path::Path::new(worktree), base, "HEAD")
+        let changed = patina_tools::git::changed_files(std::path::Path::new(&project.path), base, branch)
             .await
             .unwrap_or_default();
         if changed.is_empty() {

@@ -5,6 +5,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+mod doctor;
 mod run;
 
 #[derive(Parser)]
@@ -63,6 +64,31 @@ enum Command {
         data_dir: Option<PathBuf>,
         prompt: String,
     },
+    /// Internal: restrict this process with Landlock, then run a program. Used by the Landlock sandbox
+    #[cfg(target_os = "linux")]
+    #[command(name = "sandbox-exec", hide = true)]
+    SandboxExec {
+        #[arg(long)]
+        rw: Vec<PathBuf>,
+        #[arg(long)]
+        ro: Vec<PathBuf>,
+        #[arg(long)]
+        dev: Vec<PathBuf>,
+        #[arg(long)]
+        block_tcp: bool,
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+    /// Check git, the sandbox, the container runtime, ports, config files and leftover worktrees
+    Doctor {
+        /// Print the report as JSON
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        config_dir: Option<PathBuf>,
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
     /// Forget the owner password and print a new one-time setup token
     ResetPassword {
         #[arg(long)]
@@ -83,9 +109,34 @@ fn init_logging(format: LogFormat) {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<ExitCode> {
-    match Cli::parse().command {
+fn main() -> Result<ExitCode> {
+    let command = Cli::parse().command;
+    // The sandbox helper runs before any thread exists: the restriction covers this process and all it starts.
+    #[cfg(target_os = "linux")]
+    if let Command::SandboxExec {
+        rw,
+        ro,
+        dev,
+        block_tcp,
+        command,
+    } = command
+    {
+        let policy = patina_tools::sandbox::landlock::Policy { rw, ro, dev, block_tcp };
+        let why = patina_tools::sandbox::landlock::exec_restricted(&policy, std::path::Path::new(&command[0]), &command[1..]);
+        eprintln!("patina: {why}");
+        // 126: the command was found but could not be run.
+        return Ok(ExitCode::from(126));
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run_command(command))
+}
+
+async fn run_command(command: Command) -> Result<ExitCode> {
+    match command {
+        #[cfg(target_os = "linux")]
+        Command::SandboxExec { .. } => unreachable!("handled before the runtime starts"),
         Command::Run {
             project,
             team,
@@ -119,6 +170,22 @@ async fn main() -> Result<ExitCode> {
                 max_wall_clock_s,
             };
             return Ok(ExitCode::from(run::run(paths, args).await?));
+        }
+        Command::Doctor {
+            json,
+            config_dir,
+            data_dir,
+        } => {
+            // Doctor only looks: the folders are not created here.
+            let paths = Paths::resolve(config_dir.as_deref(), data_dir.as_deref())
+                .context("cannot determine config and data folders; pass --config-dir and --data-dir")?;
+            let report = doctor::report(&paths).await;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                report.print(&mut std::io::stdout().lock())?;
+            }
+            return Ok(if report.healthy() { ExitCode::SUCCESS } else { ExitCode::from(1) });
         }
         Command::Version => {
             println!("patina {}", env!("CARGO_PKG_VERSION"));

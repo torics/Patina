@@ -18,8 +18,10 @@ pub enum ToolKind {
 pub struct ToolOutput {
     pub content: String,
     pub is_error: bool,
-    /// True when files in the workspace changed, so the loop makes a checkpoint.
+    /// True when files in the workspace may have changed, so the loop makes a checkpoint.
     pub changed_files: bool,
+    /// A short line for the checkpoint, when the first line of `content` does not say what was done.
+    pub summary: Option<String>,
 }
 
 impl ToolOutput {
@@ -33,7 +35,7 @@ impl ToolOutput {
         ToolOutput {
             content: content.into(),
             is_error: true,
-            changed_files: false,
+            ..Default::default()
         }
     }
 }
@@ -45,6 +47,10 @@ pub trait Tool: Send + Sync {
     /// A unified diff of what the call would change, shown on the approval card. `None` for non-edits.
     async fn preview(&self, _args: &Value) -> Option<String> {
         None
+    }
+    /// True when the tool enforces its own time limit, so the loop does not add one.
+    fn own_timeout(&self) -> bool {
+        false
     }
     async fn call(&self, args: Value) -> ToolOutput;
 }

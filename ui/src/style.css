@@ -58,6 +58,10 @@ label.check { display: flex; gap: .5rem; align-items: center; margin: .25rem 0; 
 .changes { margin-top: 1rem; } .files, .checkpoints { margin: .5rem 0; padding-left: 1.5rem; } .files { list-style: none; padding: 0; }
 .file { display: inline-block; min-width: 4.5rem; color: var(--muted); } .file.A { color: var(--accent); } .file.D { color: var(--danger); }
 h4 { margin: .75rem 0 .25rem; font-size: .95rem; }
+.badge { display: inline-block; font-size: .8rem; font-weight: 600; padding: .1rem .5rem; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.badge.on { color: var(--accent); border-color: var(--accent); } .badge.off { color: var(--warn); border-color: var(--warn); }
+.facts { margin: .5rem 0 0; padding-left: 1.25rem; color: var(--muted); font-size: .9rem; }
+.project-settings form { margin-top: .75rem; }
 section { margin-bottom: 1.5rem; }
 a { color: var(--accent); }
 @media (max-width: 640px) {

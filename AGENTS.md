@@ -7,5 +7,10 @@
 - After changing a type in `patina-core::api`, run `cargo xtask types` and commit `ui/src/api/generated`.
 - UI checks: `cd ui && npx tsc --noEmit && npm test && npx playwright test --trace off`.
 - A tool must take every path through `Workspace::resolve`. Never join a model-supplied path to a folder yourself.
+- A tool opens files only with `Workspace::read` and `Workspace::write`, which follow no link. Never `std::fs` on a path in a worktree.
 - Run git only through `patina-tools::git`, which disables hooks and signing.
+- A run's worktree is untrusted. Never run `git add`, `status`, `commit` or `worktree remove` on one, and never let git find the repository from inside it. Use `git::checkpoint`, `git::rollback` and `git::remove_worktree`. Read diffs from the repository with `git::diff`.
+- Every command an agent starts goes through the run's `Commands`, and so through its `Sandbox`. Nothing else spawns a process for an agent.
+- A sandbox backend that cannot enforce what was asked returns an error. It never falls back to something weaker.
+- Sandbox and escape tests live in `crates/patina/tests/sandbox.rs` and drive the real binary. A new way out gets a test there first.
 - New event types or payload fields need a case in `ui/src/reducer.ts` and a test in `ui/src/reducer.test.ts`.

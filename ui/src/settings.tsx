@@ -2,12 +2,14 @@ import { useEffect, useState } from "preact/hooks";
 import type { AgentConfig } from "./api/generated/AgentConfig";
 import type { PolicyMode } from "./api/generated/PolicyMode";
 import type { PresetView } from "./api/generated/PresetView";
-import type { ProjectConfig } from "./api/generated/ProjectConfig";
+import type { ProjectView } from "./api/generated/ProjectView";
+import type { SandboxChoice } from "./api/generated/SandboxChoice";
 import type { ProviderKind } from "./api/generated/ProviderKind";
 import type { ProviderTestResult } from "./api/generated/ProviderTestResult";
 import type { ProviderView } from "./api/generated/ProviderView";
 import { api, ApiError } from "./api";
-import { agents, projects, providers, refresh, report, sandboxLevel, toolNames, view } from "./state";
+import { lines, looksLikeCredentials, parseEnv } from "./policy";
+import { agents, projects, providers, refresh, report, sandbox, toolNames, view } from "./state";
 
 const KINDS: ProviderKind[] = ["openai_compatible", "openai", "anthropic", "gemini", "ollama"];
 
@@ -273,9 +275,38 @@ const POLICIES: { value: PolicyMode; label: string }[] = [
   { value: "autopilot", label: "Never ask" },
 ];
 
-/** The policies to offer. "Never ask" is offered only with a sandbox; a project that already has it keeps showing it. */
-function policyChoices(current?: PolicyMode) {
-  return POLICIES.filter((p) => p.value !== "autopilot" || sandboxLevel.value !== "none" || current === "autopilot");
+/** The policies to offer. "Never ask" is offered only where commands are contained; a project that already has it keeps showing it. */
+function policyChoices(contained: boolean, current?: PolicyMode) {
+  return POLICIES.filter((p) => p.value !== "autopilot" || contained || current === "autopilot");
+}
+
+const SANDBOXES: { value: SandboxChoice; label: string }[] = [
+  { value: "auto", label: "Automatic (the strongest one this machine has)" },
+  { value: "landlock", label: "Landlock" },
+  { value: "container", label: "Container" },
+  { value: "none", label: "None (every edit and command asks)" },
+];
+
+const LEVEL_NAME: Record<string, string> = { landlock: "Landlock", container: "a container", none: "no sandbox" };
+
+/** What contains commands on the machine that runs Patina. Only what was detected is listed. */
+function SandboxCard() {
+  const s = sandbox.value;
+  if (!s) return null;
+  return (
+    <div class="card" role="region" aria-label="Sandbox">
+      <h3>
+        Sandbox on this machine: <span class={`badge ${s.level === "none" ? "off" : "on"}`}>{LEVEL_NAME[s.level] ?? s.level}</span>
+      </h3>
+      <p>{s.summary}</p>
+      <ul class="facts">
+        <li>Landlock file confinement: {s.landlock_abi === null ? "not available" : `available (ABI ${s.landlock_abi}${s.landlock_abi >= 6 ? " or later" : ""})`}</li>
+        <li>Blocking TCP for a project without network: {s.tcp_block ? "available. UDP is never blocked, so this is not full network isolation" : "not available under Landlock on this kernel"}</li>
+        <li>Container runtime: {s.container_runtime ?? "none found"}</li>
+        <li>Memory, CPU and process limits: {s.resource_limits.length ? s.resource_limits.join(", ") : "none enforced"}</li>
+      </ul>
+    </div>
+  );
 }
 
 function ProjectForm({ onDone }: { onDone: () => void }) {
@@ -312,7 +343,7 @@ function ProjectForm({ onDone }: { onDone: () => void }) {
       <label>
         Approvals
         <select name="policy" value={policy} onChange={(e) => setPolicy(e.currentTarget.value as PolicyMode)}>
-          {policyChoices().map((p) => (
+          {policyChoices(sandbox.value !== null && sandbox.value.level !== "none").map((p) => (
             <option value={p.value}>{p.label}</option>
           ))}
         </select>
@@ -334,37 +365,164 @@ function ProjectForm({ onDone }: { onDone: () => void }) {
   );
 }
 
-function ProjectRow({ p }: { p: ProjectConfig }) {
+/** The sandbox, command and worktree settings of one project. */
+function ProjectSettings({ p, saved, setSaved }: { p: ProjectView; saved: boolean; setSaved: (v: boolean) => void }) {
+  const [choice, setChoice] = useState<SandboxChoice>(p.sandbox);
+  const [image, setImage] = useState(p.container_image ?? "");
+  const [network, setNetwork] = useState(p.network);
+  const [allow, setAllow] = useState(p.allow_commands.join("\n"));
+  const [env, setEnv] = useState(
+    Object.entries(p.env)
+      .map(([k, v]) => `${k}=${v}`)
+      .join("\n"),
+  );
+  const [read, setRead] = useState(p.sandbox_read.join("\n"));
+  const [write, setWrite] = useState(p.sandbox_write.join("\n"));
+  const [copy, setCopy] = useState(p.worktree_copy.join("\n"));
+  const [secrets, setSecrets] = useState<string[]>(p.worktree_copy_secrets);
+  const [setup, setSetup] = useState(p.worktree_setup ?? "");
+  const [error, setError] = useState<string | null>(null);
+  const risky = lines(copy).filter(looksLikeCredentials);
+  const input = (set: (v: string) => void) => (e: { currentTarget: { value: string } }) => (set(e.currentTarget.value), setSaved(false));
+  async function save(e: Event) {
+    e.preventDefault();
+    setError(null);
+    const parsed = parseEnv(env);
+    if (parsed.bad !== null) return setError(`"${parsed.bad}" is not in the form NAME=value.`);
+    const copied = lines(copy);
+    try {
+      await api.updateProject(p.id, {
+        sandbox: choice,
+        container_image: image.trim() || null,
+        network,
+        allow_commands: lines(allow),
+        env: parsed.env,
+        sandbox_read: lines(read),
+        sandbox_write: lines(write),
+        worktree_copy: copied,
+        worktree_copy_secrets: secrets.filter((s) => copied.includes(s)),
+        worktree_setup: setup.trim() || null,
+      });
+      await refresh();
+      setSaved(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
   return (
-    <li class="card row">
-      <strong>{p.name}</strong>
-      <span class="muted">{p.path}</span>
-      <select
-        aria-label={`Approvals for ${p.name}`}
-        value={p.policy}
-        onChange={(e) =>
-          api
-            .updateProject(p.id, { policy: e.currentTarget.value as PolicyMode })
-            .then(refresh)
-            .catch(report)
-        }
-      >
-        {policyChoices(p.policy).map((o) => (
-          <option value={o.value}>{o.label}</option>
+      <form onSubmit={save}>
+        <label>
+          Sandbox
+          <select name="sandbox" value={choice} onChange={(e) => (setChoice(e.currentTarget.value as SandboxChoice), setSaved(false))}>
+            {SANDBOXES.map((o) => (
+              <option value={o.value}>{o.label}</option>
+            ))}
+          </select>
+        </label>
+        {(choice === "container" || choice === "auto") && (
+          <label>
+            Container image{choice === "auto" ? " (used only when this machine has no Landlock)" : ""}
+            <input name="container_image" value={image} onInput={input(setImage)} placeholder="docker.io/library/node:22" />
+          </label>
+        )}
+        <label class="check">
+          <input type="checkbox" name="network" checked={network} onChange={(e) => (setNetwork(e.currentTarget.checked), setSaved(false))} />
+          Commands may use the network
+        </label>
+        {!network && p.effective_sandbox === "landlock" && <p class="muted">Under Landlock this blocks TCP connections. UDP is not blocked.</p>}
+        <label>
+          Commands that run without asking, one pattern per line. <code>*</code> stands for anything.
+          <textarea name="allow_commands" rows={3} value={allow} onInput={input(setAllow)} placeholder={"cargo test*\nnpm run *"} />
+        </label>
+        <label>
+          Environment variables for commands, one NAME=value per line. Never put a secret here: the agent can read them.
+          <textarea name="env" rows={2} value={env} onInput={input(setEnv)} />
+        </label>
+        <label>
+          Extra folders commands may read, one per line (for example a toolchain outside the system folders)
+          <textarea name="sandbox_read" rows={2} value={read} onInput={input(setRead)} />
+        </label>
+        <label>
+          Extra folders commands may write to, one per line (for example a shared package cache)
+          <textarea name="sandbox_write" rows={2} value={write} onInput={input(setWrite)} />
+        </label>
+        <label>
+          Ignored files and folders to copy into each run's copy of the project, one per line (for example node_modules)
+          <textarea name="worktree_copy" rows={2} value={copy} onInput={input(setCopy)} />
+        </label>
+        {risky.map((path) => (
+          <div class="approval">
+            <p class="warn">
+              <code>{path}</code> looks like a file with credentials. The agent can read a copied file, and what it reads can be sent to your model provider.
+            </p>
+            <label class="check">
+              <input
+                type="checkbox"
+                aria-label={`Copy ${path} anyway`}
+                checked={secrets.includes(path)}
+                onChange={(e) => (setSecrets(e.currentTarget.checked ? [...secrets, path] : secrets.filter((s) => s !== path)), setSaved(false))}
+              />
+              Copy it anyway
+            </label>
+          </div>
         ))}
-      </select>
-      <button
-        class="link danger"
-        aria-label={`Remove ${p.name}`}
-        onClick={() =>
-          api
-            .deleteProject(p.id)
-            .then(refresh)
-            .catch(report)
-        }
-      >
-        Remove
-      </button>
+        <label>
+          Command to run in each new copy before the agent starts (for example npm ci). It runs inside the sandbox.
+          <input name="worktree_setup" value={setup} onInput={input(setSetup)} />
+        </label>
+        {error && <p class="error">{error}</p>}
+        <div class="row">
+          <button type="submit">Save settings</button>
+          {saved && <span class="ok">Saved.</span>}
+        </div>
+      </form>
+  );
+}
+
+function ProjectRow({ p }: { p: ProjectView }) {
+  const contained = p.effective_sandbox !== null && p.effective_sandbox !== "none";
+  const [open, setOpen] = useState(false);
+  const [saved, setSaved] = useState(false);
+  return (
+    <li class="card">
+      <div class="row">
+        <strong>{p.name}</strong>
+        <span class="muted">{p.path}</span>
+        <span class={`badge ${contained ? "on" : "off"}`}>{p.sandbox_error ? "sandbox unavailable" : `sandbox: ${p.effective_sandbox}`}</span>
+        <select
+          aria-label={`Approvals for ${p.name}`}
+          value={p.policy}
+          onChange={(e) =>
+            api
+              .updateProject(p.id, { policy: e.currentTarget.value as PolicyMode })
+              .then(refresh)
+              .catch(report)
+          }
+        >
+          {policyChoices(contained, p.policy).map((o) => (
+            <option value={o.value}>{o.label}</option>
+          ))}
+        </select>
+        <button
+          class="link danger"
+          aria-label={`Remove ${p.name}`}
+          onClick={() =>
+            api
+              .deleteProject(p.id)
+              .then(refresh)
+              .catch(report)
+          }
+        >
+          Remove
+        </button>
+      </div>
+      {p.sandbox_error && <p class="error">Runs in this project are refused: {p.sandbox_error}.</p>}
+      {!contained && !p.sandbox_error && <p class="muted">Without a sandbox, every edit and command asks for approval whatever is chosen here.</p>}
+      <details class="project-settings" open={open} onToggle={(e) => setOpen(e.currentTarget.open)}>
+        <summary>Sandbox and commands</summary>
+        {/* The form starts again from the saved settings whenever they change, for example when an approval adds a pattern. */}
+        {open && <ProjectSettings key={JSON.stringify(p)} p={p} saved={saved} setSaved={setSaved} />}
+      </details>
     </li>
   );
 }
@@ -375,6 +533,10 @@ export function Settings() {
   const [addingProject, setAddingProject] = useState(false);
   const noProviders = providers.value.length === 0;
   const noAgents = agents.value.length === 0;
+  // Settings can change outside this page: an approval adds an allowlist pattern, or a file is edited by hand.
+  useEffect(() => {
+    refresh().catch(report);
+  }, []);
   return (
     <div class="settings">
       {(noProviders || noAgents) && (
@@ -418,8 +580,8 @@ export function Settings() {
           <h2>Projects</h2>
           <p class="muted">
             A project is a folder with a git repository. An agent works in its own copy on a separate branch, and nothing reaches your branch until you merge it.
-            {sandboxLevel.value === "none" && " This version has no sandbox yet, so every edit asks for approval whatever is chosen here."}
           </p>
+          <SandboxCard />
           <ul class="list">
             {projects.value.map((p) => (
               <ProjectRow key={p.id} p={p} />

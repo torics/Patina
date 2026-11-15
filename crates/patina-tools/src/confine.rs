@@ -1,5 +1,9 @@
 //! Path confinement. Every tool path goes through `Workspace::resolve`, which resolves symlinks
 //! first and then checks that the real path is inside the workspace.
+//!
+//! A check alone is not enough once commands exist: a background process of the same run can swap a folder
+//! for a symbolic link between the check and the use. So files are opened through `Workspace::read` and
+//! `Workspace::write`, which walk down from the workspace root one name at a time and follow no link.
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
@@ -87,6 +91,98 @@ impl Workspace {
             return Err(PathError::GitDir(shown));
         }
         Ok(full)
+    }
+
+    /// Read a file at a path that `resolve` returned. No symbolic link is followed on the way, so a path that
+    /// was swapped for a link after it was checked is refused, not followed out of the workspace.
+    pub fn read(&self, full: &Path) -> std::io::Result<Vec<u8>> {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        self.open(full, false)?.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    /// Write a file at a path that `resolve` returned, creating missing folders. No symbolic link is followed.
+    pub fn write(&self, full: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        use std::io::Write;
+        self.open(full, true)?.write_all(bytes)
+    }
+
+    #[cfg(unix)]
+    fn open(&self, full: &Path, create: bool) -> std::io::Result<std::fs::File> {
+        use rustix::fs::{FileType, Mode, OFlags, fstat, mkdirat, open, openat};
+        use rustix::io::Errno;
+        let invalid = |why: &str| std::io::Error::new(std::io::ErrorKind::InvalidInput, why.to_string());
+        // A link where a folder or file was a moment ago means something is racing this call.
+        let moved = |e: Errno| match e {
+            Errno::LOOP => std::io::Error::other("the path changed while it was being used: a symbolic link is in the way"),
+            other => other.into(),
+        };
+        let rel = full
+            .strip_prefix(&self.root)
+            .map_err(|_| invalid("the path is outside the workspace"))?;
+        let mut names = Vec::new();
+        for c in rel.components() {
+            match c {
+                Component::Normal(name) => names.push(name),
+                _ => return Err(invalid("the path is not a plain path inside the workspace")),
+            }
+        }
+        let Some((last, folders)) = names.split_last() else {
+            return Err(invalid("the path is the workspace folder itself"));
+        };
+        let folder_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let mut dir = open(&self.root, folder_flags, Mode::empty())?;
+        for name in folders {
+            dir = match openat(&dir, *name, folder_flags, Mode::empty()) {
+                Ok(d) => d,
+                Err(Errno::NOENT) if create => {
+                    match mkdirat(&dir, *name, Mode::from_raw_mode(0o777)) {
+                        Ok(()) | Err(Errno::EXIST) => {}
+                        Err(e) => return Err(e.into()),
+                    }
+                    openat(&dir, *name, folder_flags, Mode::empty()).map_err(moved)?
+                }
+                Err(e) => return Err(moved(e)),
+            };
+        }
+        let access = if create {
+            OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC
+        } else {
+            OFlags::RDONLY
+        };
+        // NONBLOCK: opening a named pipe that something left here must not hang the tool.
+        let fd = openat(
+            &dir,
+            *last,
+            access | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o666),
+        )
+        .map_err(moved)?;
+        if FileType::from_raw_mode(fstat(&fd)?.st_mode) != FileType::RegularFile {
+            return Err(invalid("not a regular file"));
+        }
+        Ok(std::fs::File::from(fd))
+    }
+
+    /// Without `openat` there is no race-free way to open a path here. No sandbox backend runs commands
+    /// directly on these systems, so nothing shares the workspace with the tools while they run.
+    #[cfg(not(unix))]
+    fn open(&self, full: &Path, create: bool) -> std::io::Result<std::fs::File> {
+        if !full.starts_with(&self.root) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "the path is outside the workspace",
+            ));
+        }
+        if create {
+            if let Some(parent) = full.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::File::create(full)
+        } else {
+            std::fs::File::open(full)
+        }
     }
 
     /// The path relative to the root, for display.
@@ -183,5 +279,77 @@ mod tests {
         assert_eq!(w.is_fresh(&p, b"b"), Some(false));
         w.forget_all();
         assert_eq!(w.is_fresh(&p, b"a"), None);
+    }
+
+    #[test]
+    fn files_are_read_and_written_below_the_root() {
+        let (_t, w) = ws();
+        let a = w.resolve("src/a.txt").unwrap();
+        assert_eq!(w.read(&a).unwrap(), b"a");
+        w.write(&a, b"changed").unwrap();
+        assert_eq!(std::fs::read(&a).unwrap(), b"changed");
+        // Missing folders are created on the way.
+        let deep = w.resolve("new/deeper/b.txt").unwrap();
+        w.write(&deep, b"b").unwrap();
+        assert_eq!(w.read(&deep).unwrap(), b"b");
+        assert!(w.read(&w.resolve("src").unwrap()).is_err(), "a folder is not a file");
+        assert!(w.write(w.root(), b"x").is_err());
+        assert!(
+            w.read(Path::new("/etc/hostname")).is_err(),
+            "a path outside the root is refused whoever passes it"
+        );
+    }
+
+    /// The race a background process can run: the path is checked, then a folder or the file itself is
+    /// replaced by a link that leads out. The open must not follow it.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_swapped_in_after_the_check_is_not_followed() {
+        use std::os::unix::fs::symlink;
+        let (t, w) = ws();
+        let secret = t.path().join("secret.txt");
+        let outside = t.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("a.txt"), "outside file").unwrap();
+
+        // The checks pass while everything is ordinary.
+        let file = w.resolve("src/a.txt").unwrap();
+        let new = w.resolve("src/new.txt").unwrap();
+        let deep = w.resolve("src/more/deep.txt").unwrap();
+
+        // The file becomes a link to a file outside.
+        std::fs::remove_file(&file).unwrap();
+        symlink(&secret, &file).unwrap();
+        let err = w.read(&file).unwrap_err().to_string();
+        assert!(err.contains("symbolic link"), "{err}");
+        assert!(w.write(&file, b"overwritten").is_err());
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "outside");
+
+        // The folder becomes a link to a folder outside.
+        std::fs::remove_file(&file).unwrap();
+        std::fs::remove_dir(w.root().join("src")).unwrap();
+        symlink(&outside, w.root().join("src")).unwrap();
+        assert!(w.read(&file).is_err());
+        assert!(w.write(&file, b"overwritten").is_err());
+        assert!(w.write(&new, b"planted").is_err());
+        assert!(w.write(&deep, b"planted").is_err());
+        assert_eq!(std::fs::read_to_string(outside.join("a.txt")).unwrap(), "outside file");
+        let left: Vec<_> = std::fs::read_dir(&outside).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left.len(), 1, "nothing was created outside: {left:?}");
+    }
+
+    /// A named pipe in the workspace would block an ordinary open for ever.
+    #[cfg(unix)]
+    #[test]
+    fn a_named_pipe_is_refused_without_waiting() {
+        let (_t, w) = ws();
+        let pipe = w.root().join("src/pipe");
+        let made = std::process::Command::new("mkfifo").arg(&pipe).status().unwrap();
+        assert!(made.success());
+        let full = w.resolve("src/pipe").unwrap();
+        let started = std::time::Instant::now();
+        assert!(w.read(&full).is_err());
+        assert!(w.write(&full, b"x").is_err());
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
     }
 }

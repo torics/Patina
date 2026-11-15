@@ -6,8 +6,8 @@ import type { CheckpointView } from "./api/generated/CheckpointView";
 import type { DiffView } from "./api/generated/DiffView";
 import type { MergeResult } from "./api/generated/MergeResult";
 import type { NewProject } from "./api/generated/NewProject";
-import type { PolicyMode } from "./api/generated/PolicyMode";
 import type { ProjectConfig } from "./api/generated/ProjectConfig";
+import type { ProjectView } from "./api/generated/ProjectView";
 import type { NewRun } from "./api/generated/NewRun";
 import type { PresetView } from "./api/generated/PresetView";
 import type { ProviderInput } from "./api/generated/ProviderInput";
@@ -16,6 +16,9 @@ import type { ProviderView } from "./api/generated/ProviderView";
 import type { RunView } from "./api/generated/RunView";
 import type { SessionState } from "./api/generated/SessionState";
 import type { SystemInfo } from "./api/generated/SystemInfo";
+
+/** The settings of a project that can change. The id and the folder cannot. */
+export type ProjectPatch = { [K in Exclude<keyof ProjectConfig, "id" | "path">]?: ProjectConfig[K] | null };
 
 const BASE = "/api/v1";
 let csrf = "";
@@ -84,9 +87,10 @@ export const api = {
   rollback: (id: string, step: number) => call<CheckpointView[]>("POST", `/runs/${encodeURIComponent(id)}/rollback`, { step }),
   merge: (id: string) => call<MergeResult>("POST", `/runs/${encodeURIComponent(id)}/merge`, {}),
   discard: (id: string, keepBranch: boolean) => call<RunView>("POST", `/runs/${encodeURIComponent(id)}/discard`, { keep_branch: keepBranch }),
-  projects: () => call<ProjectConfig[]>("GET", "/projects"),
-  createProject: (p: NewProject) => call<ProjectConfig>("POST", "/projects", p),
-  updateProject: (id: string, patch: { name?: string; policy?: PolicyMode }) => call<ProjectConfig>("PATCH", `/projects/${encodeURIComponent(id)}`, patch),
+  projects: () => call<ProjectView[]>("GET", "/projects"),
+  createProject: (p: NewProject) => call<ProjectView>("POST", "/projects", p),
+  /** Only the settings that are sent change; `null` puts a setting back to its default. */
+  updateProject: (id: string, patch: ProjectPatch) => call<ProjectView>("PATCH", `/projects/${encodeURIComponent(id)}`, patch),
   deleteProject: (id: string) => call("DELETE", `/projects/${encodeURIComponent(id)}`),
   eventsUrl: (id: string, after: number) => `${BASE}/runs/${encodeURIComponent(id)}/events?after=${after}`,
 };

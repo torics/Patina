@@ -5,6 +5,10 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      # The runner has Landlock and Docker. A sandbox test that cannot run here is a failure, not a skip.
+      PATINA_REQUIRE_LANDLOCK: "1"
+      PATINA_TEST_CONTAINER: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -20,8 +24,12 @@ jobs:
       - run: npm test
         working-directory: ui
       - run: cargo clippy --all-targets -- -D warnings
+      - name: Image for the container sandbox test
+        run: docker pull alpine:3
       - run: cargo test --all
       - run: cargo build --release
+      - name: What this host supports
+        run: ./target/release/patina doctor --config-dir "$RUNNER_TEMP/patina-config" --data-dir "$RUNNER_TEMP/patina-data"
       - run: ./scripts/check-budgets.sh
       - name: Browser smoke test
         working-directory: ui

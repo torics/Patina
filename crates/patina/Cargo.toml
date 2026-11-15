@@ -14,6 +14,7 @@ patina-store.workspace = true
 patina-server.workspace = true
 patina-tools.workspace = true
 futures.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 clap.workspace = true

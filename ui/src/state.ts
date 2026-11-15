@@ -2,9 +2,10 @@ import { signal } from "@preact/signals";
 import type { AgentConfig } from "./api/generated/AgentConfig";
 import type { Budgets } from "./api/generated/Budgets";
 import type { Event } from "./api/generated/Event";
-import type { ProjectConfig } from "./api/generated/ProjectConfig";
+import type { ProjectView } from "./api/generated/ProjectView";
 import type { ProviderView } from "./api/generated/ProviderView";
 import type { RunView } from "./api/generated/RunView";
+import type { SandboxStatus } from "./api/generated/SandboxStatus";
 import { api, ApiError } from "./api";
 import { applyDelta, applyEvent, emptyTimeline, isTerminal, type Timeline } from "./reducer";
 
@@ -13,11 +14,11 @@ export const screen = signal<Screen>("loading");
 export const view = signal<"chat" | "settings">("chat");
 export const providers = signal<ProviderView[]>([]);
 export const agents = signal<AgentConfig[]>([]);
-export const projects = signal<ProjectConfig[]>([]);
+export const projects = signal<ProjectView[]>([]);
 /** Names of the tools an agent can be given, as the daemon reports them. */
 export const toolNames = signal<string[]>([]);
-/** `none` means no sandbox is active, so every edit asks whatever a project's policy says. */
-export const sandboxLevel = signal("none");
+/** What the daemon's host can contain commands with, as it was detected. */
+export const sandbox = signal<SandboxStatus | null>(null);
 export const runs = signal<RunView[]>([]);
 export const selectedRun = signal<string | null>(null);
 export const timeline = signal<Timeline>(emptyTimeline());
@@ -54,7 +55,7 @@ export async function enter() {
 
 export async function refresh() {
   const [p, a, r, pr, sys] = await Promise.all([api.providers(), api.agents(), api.runs(), api.projects(), api.system()]);
-  [providers.value, agents.value, runs.value, projects.value, toolNames.value, sandboxLevel.value] = [p, a, r, pr, sys.tools, sys.sandbox_level];
+  [providers.value, agents.value, runs.value, projects.value, toolNames.value, sandbox.value] = [p, a, r, pr, sys.tools, sys.sandbox];
 }
 
 let source: EventSource | null = null;

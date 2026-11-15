@@ -4,83 +4,8 @@ use common::*;
 use patina_providers::mock::Script;
 use patina_tools::git;
 use serde_json::{Value, json};
-use std::path::PathBuf;
-use std::time::Duration;
 
 const ALL_TOOLS: [&str; 5] = ["list_files", "read_file", "search", "edit_file", "write_file"];
-
-/// A signed-in daemon with a provider, an agent holding `tools`, and a project over a fresh repository.
-async fn workbench(scripts: Vec<Script>, tools: &[&str]) -> (Daemon, PathBuf) {
-    let mut d = start(scripts, false).await;
-    d.sign_in().await;
-    assert_eq!(
-        d.post(
-            "/providers",
-            json!({"id": "p1", "kind": "openai_compatible", "base_url": "http://127.0.0.1:9/v1"})
-        )
-        .await
-        .0,
-        200
-    );
-    let (s, b) = d
-        .post(
-            "/agents",
-            json!({"id": "a1", "name": "Builder", "provider": "p1", "model": "m1", "tools": tools}),
-        )
-        .await;
-    assert_eq!(s, 200, "{b}");
-    let repo = d.dir.path().join("site");
-    std::fs::create_dir_all(&repo).unwrap();
-    git::init(&repo).await.unwrap();
-    std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
-    std::fs::write(repo.join("AGENTS.md"), "Always write Spanish.\n").unwrap();
-    git::checkpoint(&repo, "first").await.unwrap().unwrap();
-    let (s, b) = d
-        .post("/projects", json!({"path": repo.to_str().unwrap(), "policy": "confirm_all"}))
-        .await;
-    assert_eq!((s, b["id"].as_str()), (200, Some("site")), "{b}");
-    (d, repo)
-}
-
-async fn start_run(d: &Daemon, extra: Value) -> String {
-    let mut body = json!({"agent_id": "a1", "prompt": "translate", "project_id": "site"});
-    body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
-    let (s, b) = d.post("/runs", body).await;
-    assert_eq!(s, 200, "{b}");
-    b["id"].as_str().unwrap().to_string()
-}
-
-async fn get_json(d: &Daemon, path: &str) -> Value {
-    let (s, b) = d.get(path).await;
-    assert_eq!(s, 200, "GET {path}: {b}");
-    serde_json::from_str(&b).unwrap()
-}
-
-/// Wait for the run's next pending approval.
-async fn next_approval(d: &Daemon, run: &str) -> Value {
-    for _ in 0..300 {
-        let list = get_json(d, "/approvals?status=pending").await;
-        if let Some(a) = list.as_array().unwrap().iter().find(|a| a["run_id"] == run) {
-            return a.clone();
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("no approval was requested");
-}
-
-async fn answer(d: &Daemon, run: &str, approval: &Value, body: Value) -> u16 {
-    d.post(&format!("/runs/{run}/approvals/{}", approval["id"].as_str().unwrap()), body)
-        .await
-        .0
-}
-
-fn worktree(d: &Daemon, run: &str) -> PathBuf {
-    d.dir.path().join("data/worktrees").join(run)
-}
-
-fn kinds(events: &[Value]) -> Vec<&str> {
-    events.iter().map(|e| e["type"].as_str().unwrap()).collect()
-}
 
 #[tokio::test]
 async fn an_agent_edits_a_repository_in_a_worktree_and_the_owner_approves_diffs_and_merges() {
@@ -501,19 +426,19 @@ async fn projects_must_be_git_repositories_outside_patinas_own_folders() {
         .send(
             reqwest::Method::PATCH,
             "/projects/site",
-            json!({"policy": "autopilot", "name": "My Site"}),
+            json!({"policy": "auto_edit", "name": "My Site"}),
         )
         .await;
     assert_eq!(
         (s, b["policy"].as_str(), b["name"].as_str()),
-        (200, Some("autopilot"), Some("My Site"))
+        (200, Some("auto_edit"), Some("My Site"))
     );
     assert_eq!(
         d.send(reqwest::Method::PATCH, "/projects/site", json!({"policy": "yolo"})).await.0,
         400
     );
     let toml = std::fs::read_to_string(d.dir.path().join("config/projects.toml")).unwrap();
-    assert!(toml.contains("policy = \"autopilot\""), "{toml}");
+    assert!(toml.contains("policy = \"auto_edit\""), "{toml}");
     assert_eq!(d.send(reqwest::Method::DELETE, "/projects/site", json!({})).await.0, 200);
     assert!(repo.join("a.txt").exists(), "unregistering leaves the folder alone");
     assert_eq!(

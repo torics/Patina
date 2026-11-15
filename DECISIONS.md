@@ -74,7 +74,38 @@
 - similar: unified diffs for edit approvals. Named by the brief. Small.
 - Test only: util-linux `script` gives the `patina run` test a real terminal (Linux only).
 
+## M3 choices
+- **Landlock is applied by a hidden helper subcommand** (`patina sandbox-exec`), not in a `pre_exec` closure. The daemon starts its own binary, which restricts itself, drops every Linux capability and then execs the shell. This keeps allocation and error reporting out of the forked child, and a daemon run as root is contained the same way.
+- **`sandbox = "auto"` picks Landlock, else a container when the project has a `container_image` and Docker or Podman is found, else none.** A project that names a backend the host cannot give is refused a run (`sandbox_unavailable`); it is never moved to a weaker backend.
+- **`network = false` under Landlock needs ABI 4 and blocks TCP only.** On an older kernel such a project is refused; the container backend (`--network none`) is the real network isolation. SECURITY.md says UDP is not blocked.
+- **One container per run, not per project** (deviation from the brief). Two runs of one project must not see each other's worktree, and the container ends with the run. It starts with `--cap-drop ALL --security-opt no-new-privileges` and mounts only the worktree and the project's extra folders.
+- **The `none` backend still scrubs the environment** and uses process groups, and keeps the real `HOME`. Because nothing contains it, every edit and command asks, the API refuses `autopilot` (409 `needs_sandbox`, on create and on update), and `patina run --yes` is refused.
+- **No resource limits yet** (deviation from section 20, which asks for cgroup v2 limits where a delegated subtree exists). Planned for M8. `patina doctor`, the Settings page and SECURITY.md say "none enforced" instead of implying a limit.
+- **Ending a command:** each command is its own process group; on timeout, stop or the end of the run the group gets `SIGTERM`, two seconds, then `SIGKILL`. Processes that left the group (`setsid`) are found by a `PATINA_CMD` marker in their environment and killed. What a foreground command leaves behind is killed when its shell exits; only `background: true` keeps a process, until the run ends.
+- **The environment is an allowlist:** `PATH`, `LANG`, `TERM`, a private `HOME` and `TMPDIR` under `data/sandbox/<run>`, and the project's `env`. The private folders are removed when the run is merged or discarded.
+- **An allowlist wildcard never matches a command with a shell operator** (`;`, `&`, `|`, `>`, `<`, backticks, `$(`). Such a command matches only a pattern equal to it. The allowlist is documented as a convenience, not a control.
+- **"Approve and always allow" saves the pattern before the answer is delivered**, so a failed save never runs the command. Only for `run_command`, one line, at most 500 characters.
+- **`ProjectView`** is the project config plus `effective_sandbox` and `sandbox_error`. The API always sends every setting; `projects.toml` keeps only what differs from the defaults. `PATCH /projects/:id` merges keys, `null` resets one, an unknown key is 400.
+- **`sandbox_read` and `sandbox_write` may not overlap Patina's config or data folder**, and neither may a project folder.
+- **Worktree preparation is part of the run's log:** `worktree_copy` and `worktree_setup` appear as tool calls without an agent. Setup runs inside the sandbox with a ten-minute limit; if it fails, the run fails. What it changes lands in the first checkpoint. A copied file that looks like credentials needs `worktree_copy_secrets`.
+- **Patina's git never trusts the worktree** (found in review, with attack tests). A command could plant git metadata that names programs to run (`core.fsmonitor`, filters, hooks), and Patina's own git, outside the sandbox, would have run them. Now git is always given the admin folder and the work tree explicitly, a checkpoint uses plumbing commands only (`ls-files`, `update-index`, `write-tree`, `commit-tree`, `update-ref`), the `.git` pointer is restored and the metadata of nested repositories is removed before each checkpoint (and reported in its summary), diffs are read from commits in the owner's repository, and a worktree is removed by deleting the folder and pruning. Needs git 2.31 or later.
+- **A run's own repository is not usable from its commands:** its `.git` folder is outside the sandbox. Agents do not commit; Patina does.
+- **File tools open files without following links** (found in review, with attack tests). A background command could swap a folder for a symbolic link between the path check and the open. `Workspace::read` and `Workspace::write` walk from the worktree root with `openat(O_NOFOLLOW)` and accept regular files only. Unix only; on other systems no sandbox backend runs commands next to the tools.
+- **`patina doctor`** checks git, the sandbox backends, the config files, the ports, each project's sandbox and the database, creates nothing, prints what is not covered, and exits 1 on a problem. `--json` for scripts. Landlock is reported as "ABI 6 or later" because the crate knows no newer one.
+- **Sandbox tests fail instead of skipping in CI:** `PATINA_REQUIRE_LANDLOCK=1` makes a missing Landlock a failure, `PATINA_TEST_CONTAINER=1` runs the container test (needs Docker or Podman and `alpine:3`).
+
+## M3 dependencies (stripped release binary: 10.6 MB, up from 10.2 MB; idle memory 9.4 MB; UI 21.9 KB gzipped)
+- landlock 0.4: the Landlock rules. Named by the brief. Linux only.
+- rustix 1 (`fs`, `process`, `thread`): process groups and signals, capability drop, no-follow opens. Safe wrappers over the system calls, so `patina-tools` needs no `unsafe`. Unix only. Small.
+- tracing and tokio-util in `patina-tools`, serde in the `patina` crate: already in the workspace.
+- Test only: Docker or Podman with `alpine:3` for the container test; a Rust toolchain for the build-and-test run.
+
 ## Open risks
 - rustls uses aws-lc-rs, which needs a C toolchain when cross-compiling. Check static musl builds early in M8, and switch to the ring provider if needed.
 - Live checks against real hosted providers have not been run (they need the owner's keys). This now includes tool calls and reasoning replay on those providers.
 - A run that waits for approval when the daemon restarts cannot continue until M4 adds recovery.
+- Commands have no memory, CPU or process-count limit until M8. A command can slow the machine until its timeout.
+- Under Landlock a command can read `/proc` (names and command lines of other processes), can use UDP even with `network = false`, and before ABI 6 can signal other processes.
+- While a background command swaps folders for links, `list_files` and `search` can list file names outside the worktree, never content.
+- Windows has no process-tree kill and no no-follow open yet; the container backend is the only sandbox there and is untested on Windows.
+- The container backend is tested against Docker only, not Podman.

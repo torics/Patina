@@ -5,4 +5,9 @@ export type ApprovalAnswer = { action: ApprovalAction,
 /**
  * For a denial: returned to the model.
  */
-note: string | null, args: Record<string, any> | null, };
+note: string | null, args: Record<string, any> | null, 
+/**
+ * With an approval of a command: also add this pattern to the project's allowlist, so that matching
+ * commands stop asking.
+ */
+allow_pattern: string | null, };

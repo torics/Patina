@@ -1,5 +1,6 @@
-// Smoke tests against the real binary: set up, add a provider and agent, chat, reload and replay; then run an
-// agent in a project, approve its edit after reading the diff, and merge the result.
+// Smoke tests against the real binary: set up, add a provider and agent, chat, reload and replay; run an agent in
+// a project, approve its edit after reading the diff, and merge the result; then let an agent run a command in
+// the sandbox and put the command on the project's allowlist.
 import { expect, test } from "@playwright/test";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -16,7 +17,7 @@ let token = "";
 let fakeUrl = "";
 let repo = "";
 
-// The second test uses the provider and agent the first one creates.
+// The later tests use the provider and agent the first one creates.
 test.describe.configure({ mode: "serial" });
 
 function chunk(delta: object, finish: string | null, usage?: object) {
@@ -38,7 +39,20 @@ test.beforeAll(async () => {
       res.writeHead(200, { "content-type": "text/event-stream" });
       const usage = { prompt_tokens: 5, completion_tokens: 5, total_tokens: 10 };
       const messages: { role: string }[] = body.messages ?? [];
-      if (body.tools?.length && !messages.some((m) => m.role === "tool")) {
+      const answered = messages.some((m) => m.role === "tool");
+      if (body.tools?.length && JSON.stringify(messages).includes("Run the tests")) {
+        // A run that needs a command.
+        if (answered) {
+          res.write(chunk({ content: "The tests pass." }, null));
+          res.end(chunk({}, "stop", usage) + "data: [DONE]\n\n");
+        } else {
+          const args = JSON.stringify({ command: "echo tests passed" });
+          res.write(chunk({ tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "run_command", arguments: args } }] }, null));
+          res.end(chunk({}, "tool_calls", usage) + "data: [DONE]\n\n");
+        }
+        return;
+      }
+      if (body.tools?.length && !answered) {
         // A run in a project: ask to write a file. The daemon must get the owner's approval first.
         const args = JSON.stringify({ path: "NOTES.md", content: "written by the agent\n" });
         res.write(chunk({ tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "write_file", arguments: args } }] }, null));
@@ -158,9 +172,13 @@ test("run an agent in a project, approve its edit after reading the diff, and me
   await page.getByRole("button", { name: "Add project" }).click();
   await page.getByLabel(/^Folder/).fill(repo);
   await page.getByRole("button", { name: "Save" }).click();
-  // The default policy applies edits without asking, and "Never ask" is not offered without a sandbox.
+  // The default policy applies edits without asking. This test is about approving an edit, so ask for each one.
   await expect(page.getByLabel("Approvals for repo")).toHaveValue("auto_edit");
-  await expect(page.getByLabel("Approvals for repo").locator("option")).toHaveCount(2);
+  await page.getByLabel("Approvals for repo").selectOption("confirm_all");
+  // The page says what contains commands on this machine, and claims no limit that is not enforced.
+  const sandbox = page.getByRole("region", { name: "Sandbox" });
+  await expect(sandbox.getByRole("heading")).toContainText("Sandbox on this machine");
+  await expect(sandbox).toContainText("Memory, CPU and process limits: none enforced");
 
   // Start a run in it.
   await page.getByRole("button", { name: "Chat" }).click();
@@ -168,7 +186,7 @@ test("run an agent in a project, approve its edit after reading the diff, and me
   await page.getByLabel("Prompt", { exact: true }).fill("Write the notes");
   await page.getByRole("button", { name: "Send" }).click();
 
-  // There is no sandbox, so the edit waits in spite of the policy: the diff is on screen and nothing is written yet.
+  // The edit waits for the owner: the diff is on screen and nothing is written yet.
   const approval = page.getByRole("group", { name: "Approval for write_file" });
   await expect(approval).toBeVisible();
   await expect(page.locator(".status")).toHaveText("waiting approval");
@@ -196,4 +214,66 @@ test("run an agent in a project, approve its edit after reading the diff, and me
   await expect(page.getByText("Merged into main.")).toBeVisible();
   await expect(page.getByText(/These changes were merged/)).toBeVisible();
   expect(readFileSync(join(repo, "NOTES.md"), "utf8")).toBe("written by the agent\n");
+});
+
+test("a command runs in the sandbox, and approving it can put it on the allowlist", async ({ page }) => {
+  await page.goto(base);
+  await page.getByLabel("Password", { exact: true }).fill("a long enough password");
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await page.getByRole("button", { name: "Settings" }).click();
+
+  // This needs a sandbox. CI has one and says so; elsewhere the test is skipped where the machine has none.
+  const heading = await page.getByRole("region", { name: "Sandbox" }).getByRole("heading").textContent();
+  const contained = !heading?.includes("no sandbox");
+  if (process.env.PATINA_REQUIRE_LANDLOCK === "1") expect(heading).toContain("Landlock");
+  test.skip(!contained, "this machine has no sandbox");
+
+  // With a sandbox, "Never ask" is offered. Edits are automatic and commands ask, unless they are on the allowlist.
+  const approvals = page.getByLabel("Approvals for repo");
+  await expect(approvals.locator("option")).toHaveCount(3);
+  await approvals.selectOption("auto_edit");
+  await expect(page.locator("li.card", { hasText: "repo" }).locator(".badge")).toHaveText(/sandbox: (landlock|container)/);
+
+  await page.getByRole("button", { name: "Chat" }).click();
+  await page.getByLabel("Project").selectOption("repo");
+  await page.getByLabel("Prompt", { exact: true }).fill("Run the tests");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  const approval = page.getByRole("group", { name: "Approval for run_command" });
+  await expect(approval).toBeVisible();
+  await expect(page.locator(".timeline .badge")).toHaveText(/^Sandbox: /);
+  await approval.getByText("Always allow commands like this").click();
+  await expect(approval.getByLabel(/^Pattern for this project/)).toHaveValue("echo tests *");
+  await approval.getByRole("button", { name: "Approve and always allow" }).click();
+  await expect(page.locator(".bubble.agent .text")).toHaveText("The tests pass.");
+  await expect(page.locator(".status")).toHaveText("completed");
+  await page.locator(".tool", { hasText: "run_command" }).getByText("Result").click();
+  await expect(page.locator(".tool", { hasText: "run_command" }).locator("pre").last()).toHaveText("exit code 0\ntests passed");
+
+  // The pattern is in the project's settings now.
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByText("Sandbox and commands").click();
+  await expect(page.locator("textarea[name=allow_commands]")).toHaveValue("echo tests *");
+
+  // The same command no longer asks.
+  await page.getByRole("button", { name: "Chat" }).click();
+  await page.getByRole("button", { name: "New chat" }).click();
+  await page.getByLabel("Project").selectOption("repo");
+  await page.getByLabel("Prompt", { exact: true }).fill("Run the tests again");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.locator(".bubble.agent .text")).toHaveText("The tests pass.");
+  await expect(page.locator(".status")).toHaveText("completed");
+  await expect(page.getByRole("group", { name: "Approval for run_command" })).toHaveCount(0);
+  await expect(page.getByText("You approved this.")).toHaveCount(0);
+
+  // A setting the daemon refuses is shown as an error and is not saved: a credentials file needs an explicit yes.
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByText("Sandbox and commands").click();
+  await page.locator("textarea[name=worktree_copy]").fill(".env");
+  await expect(page.getByText("looks like a file with credentials")).toBeVisible();
+  await page.getByRole("button", { name: "Save settings" }).click();
+  await expect(page.locator(".project-settings .error")).toContainText("looks like a file with credentials");
+  await page.getByLabel("Copy .env anyway").check();
+  await page.getByRole("button", { name: "Save settings" }).click();
+  await expect(page.getByText("Saved.")).toBeVisible();
 });

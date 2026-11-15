@@ -3,6 +3,7 @@ import type { Budgets } from "./api/generated/Budgets";
 import { api } from "./api";
 import { Changes } from "./changes";
 import { isTerminal, type AgentBlock, type ToolItem } from "./reducer";
+import { patternMatches, suggestPattern } from "./policy";
 import { agents, closeRun, openRun, projects, report, runs, selectedRun, startRun, timeline } from "./state";
 
 const DEFAULTS = { steps: "50", tokens: "2000000", cost: "", minutes: "120" };
@@ -20,6 +21,7 @@ function Composer() {
   const [limits, setLimits] = useState(DEFAULTS);
   const [busy, setBusy] = useState(false);
   const chosen = agents.value.find((a) => a.id === agent) ?? agents.value[0];
+  const picked = projects.value.find((p) => p.id === project);
   const steps = positive(limits.steps);
   const tokens = positive(limits.tokens);
   const valid = steps !== null && tokens !== null && (limits.cost.trim() === "" || positive(limits.cost) !== null) && (limits.minutes.trim() === "" || positive(limits.minutes) !== null);
@@ -66,6 +68,11 @@ function Composer() {
           ))}
         </select>
       </label>
+      {picked?.sandbox_error && <p class="error">This project's sandbox is not available here, so its runs are refused: {picked.sandbox_error}. Change it in Settings.</p>}
+      {picked?.effective_sandbox === "none" && <p class="muted">This project has no sandbox on this machine, so every edit and command will ask for your approval.</p>}
+      {picked && picked.effective_sandbox !== null && picked.effective_sandbox !== "none" && (
+        <p class="muted">Commands run in a sandbox ({picked.effective_sandbox}): they can change files only in the run's own copy of the project.</p>
+      )}
       {project && chosen && chosen.tools.length === 0 && <p class="warn">This agent has no tools, so it can talk about the project but cannot read or change files. Give it tools in Settings.</p>}
       <label>
         Prompt
@@ -109,12 +116,17 @@ function Composer() {
   );
 }
 
+/** What each sandbox level means for the owner, in a few words. */
+const SANDBOX_LABEL: Record<string, string> = { landlock: "Sandbox: Landlock", container: "Sandbox: container", none: "No sandbox: every step asks" };
+
 function ApprovalCard({ runId, item }: { runId: string; item: ToolItem }) {
+  const command = item.name === "run_command" && typeof item.args.command === "string" ? item.args.command : null;
+  const [pattern, setPattern] = useState(command === null ? "" : suggestPattern(command));
   const [note, setNote] = useState("");
   const [args, setArgs] = useState(JSON.stringify(item.args, null, 2));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  async function answer(action: "approve" | "deny" | "edit") {
+  async function answer(action: "approve" | "deny" | "edit", allowPattern: string | null = null) {
     let edited: Record<string, any> | null = null;
     if (action === "edit") {
       try {
@@ -127,7 +139,7 @@ function ApprovalCard({ runId, item }: { runId: string; item: ToolItem }) {
     setBusy(true);
     setError(null);
     try {
-      await api.answerApproval(runId, item.approval!.id, { action, note: action === "deny" && note.trim() ? note.trim() : null, args: edited });
+      await api.answerApproval(runId, item.approval!.id, { action, note: action === "deny" && note.trim() ? note.trim() : null, args: edited, allow_pattern: allowPattern });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -148,6 +160,23 @@ function ApprovalCard({ runId, item }: { runId: string; item: ToolItem }) {
           Deny
         </button>
       </div>
+      {command !== null && timeline.value.sandbox !== "none" && (
+        <details>
+          <summary>Always allow commands like this</summary>
+          <label>
+            Pattern for this project's allowlist. <code>*</code> stands for anything.
+            <input name="allow_pattern" value={pattern} onInput={(e) => setPattern(e.currentTarget.value)} />
+          </label>
+          <p class="muted">
+            Commands that match run without asking when the project applies edits without asking. A command that chains or redirects (<code>;</code> <code>&amp;</code> <code>|</code> <code>&gt;</code>) always asks, unless it is
+            listed exactly. This saves you a question; the sandbox is what contains the command.
+          </p>
+          {!patternMatches(pattern, command) && <p class="warn">This pattern does not cover the command above.</p>}
+          <button onClick={() => answer("approve", pattern.trim())} disabled={busy || !pattern.trim()}>
+            Approve and always allow
+          </button>
+        </details>
+      )}
       <details>
         <summary>Change the arguments before approving</summary>
         <textarea aria-label="Arguments as JSON" rows={6} value={args} onInput={(e) => setArgs(e.currentTarget.value)} />
@@ -163,7 +192,7 @@ function ApprovalCard({ runId, item }: { runId: string; item: ToolItem }) {
 const STATE_LABEL: Record<ToolItem["state"], string> = { running: "running", waiting: "needs approval", done: "done", failed: "failed", denied: "denied" };
 
 function ToolCard({ runId, item }: { runId: string; item: ToolItem }) {
-  const target = typeof item.args.path === "string" ? item.args.path : typeof item.args.pattern === "string" ? item.args.pattern : "";
+  const target = [item.args.command, item.args.path, item.args.pattern, item.args.id].find((v) => typeof v === "string") ?? (Array.isArray(item.args.paths) ? item.args.paths.join(", ") : "");
   const answered = item.approval && item.approval.state !== "pending";
   return (
     <div class={`tool ${item.state}`}>
@@ -279,6 +308,11 @@ function Timeline() {
     <section class="timeline">
       <div class="row">
         <span class={`status ${t.status}`}>{t.status.replace("_", " ")}</span>
+        {t.sandbox && (
+          <span class={`badge ${t.sandbox === "none" ? "off" : "on"}`} title={t.sandboxDetail ?? undefined}>
+            {SANDBOX_LABEL[t.sandbox] ?? `Sandbox: ${t.sandbox}`}
+          </span>
+        )}
         {live && (
           <button class="danger" onClick={() => api.cancelRun(id).catch(report)}>
             Stop
@@ -298,6 +332,16 @@ function Timeline() {
       {live && run && <LimitsEditor key={id} runId={id} budgets={run.budgets} />}
       {t.dirtyCheckout && <p class="warn">Your checkout had uncommitted changes when this run started. The run works from the last commit and does not include them.</p>}
       {t.prompt && <div class="bubble user">{t.prompt}</div>}
+      {t.setup.length > 0 && (
+        <article class="bubble agent" aria-label="Preparing the worktree">
+          <h3>
+            Preparing the worktree <small>before the agent starts</small>
+          </h3>
+          {t.setup.map((i) => (
+            <ToolCard key={i.id} runId={id} item={i} />
+          ))}
+        </article>
+      )}
       <div aria-live="polite">
         {t.blocks.map((b) => (
           <Block runId={id} b={b} />

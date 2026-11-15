@@ -179,4 +179,34 @@ describe("event reducer", () => {
     expect(t.changes).toBe(before + 1);
     expect(t.status).toBe("budget_exceeded");
   });
+
+  it("records the run's sandbox and the steps that prepared the worktree", () => {
+    seq = 0;
+    const t = build([
+      ev("run_started", { prompt: "go", has_workspace: true, sandbox: "landlock", sandbox_detail: "Landlock (ABI 6): commands can write only to this run's folders" }, null),
+      ev("tool_call", { id: "worktree_copy", name: "worktree_copy", args: { paths: ["node_modules"] }, step: 0 }, null),
+      ev("tool_result", { id: "worktree_copy", name: "worktree_copy", content: "copied 812 files", is_error: false }, null),
+      ev("tool_call", { id: "worktree_setup", name: "worktree_setup", args: { command: "npm ci" }, step: 0 }, null),
+      ev("agent_started", { name: "Agent", model: "m" }),
+      ev("tool_call", { id: "c1", name: "run_command", args: { command: "npm test" }, step: 1 }),
+    ]);
+    expect([t.sandbox, t.sandboxDetail]).toEqual(["landlock", "Landlock (ABI 6): commands can write only to this run's folders"]);
+    expect(t.setup.map((i) => [i.name, i.state, i.result])).toEqual([
+      ["worktree_copy", "done", "copied 812 files"],
+      ["worktree_setup", "running", null],
+    ]);
+    // The agent's own call is in its block, not among the setup steps.
+    expect(t.blocks[0].items).toHaveLength(1);
+    const failed = applyEvent(t, ev("tool_result", { id: "worktree_setup", name: "worktree_setup", content: "exit code 1", is_error: true }, null));
+    expect(failed.setup[1].state).toBe("failed");
+    // A run that ends while a setup step is still running leaves no step shown as running.
+    const ended = applyEvent(t, ev("run_finished", { status: "cancelled" }, null));
+    expect(ended.setup[1].state).toBe("failed");
+  });
+
+  it("has no sandbox for a chat without a project", () => {
+    seq = 0;
+    const t = build([ev("run_started", { prompt: "hi", has_workspace: false, sandbox: null, sandbox_detail: null }, null)]);
+    expect([t.sandbox, t.sandboxDetail, t.setup]).toEqual([null, null, []]);
+  });
 });

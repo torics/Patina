@@ -220,10 +220,11 @@ fn check_agent(st: &AppState, a: &AgentConfig) -> ApiResult<()> {
     if st.providers()?.get(&a.provider).is_none() {
         return Err(ApiError::bad_request(format!("provider {:?} does not exist", a.provider)));
     }
-    if let Some(unknown) = a.tools.iter().find(|t| !patina_tools::files::TOOL_NAMES.contains(&t.as_str())) {
+    let known = patina_tools::tool_names();
+    if let Some(unknown) = a.tools.iter().find(|t| !known.contains(&t.as_str())) {
         return Err(ApiError::bad_request(format!(
             "unknown tool {unknown:?}; the tools are {}",
-            patina_tools::files::TOOL_NAMES.join(", ")
+            known.join(", ")
         )));
     }
     Ok(())
@@ -255,24 +256,11 @@ pub async fn delete_agent(State(st): St, Path(id): Path<String>) -> ApiResult<Js
     Ok(Json(json!({"ok": true})))
 }
 
-pub async fn system(State(_st): St) -> Json<SystemInfo> {
-    let git_version = tokio::process::Command::new("git")
-        .arg("--version")
-        .output()
-        .await
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .trim()
-                .trim_start_matches("git version ")
-                .to_string()
-        });
-    // No command execution exists before M3, so there is no sandbox to report.
+pub async fn system(State(st): St) -> Json<SystemInfo> {
     Json(SystemInfo {
         version: env!("CARGO_PKG_VERSION").into(),
-        git_version,
-        sandbox_level: "none".into(),
-        tools: patina_tools::files::TOOL_NAMES.iter().map(|t| t.to_string()).collect(),
+        git_version: patina_tools::git::version().await,
+        sandbox: st.caps().await.status(),
+        tools: patina_tools::tool_names().iter().map(|t| t.to_string()).collect(),
     })
 }

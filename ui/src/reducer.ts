@@ -63,6 +63,12 @@ export interface Timeline {
   hasWorkspace: boolean;
   /** The owner's checkout had uncommitted changes that the run does not include. */
   dirtyCheckout: boolean;
+  /** What contains this run's commands: `landlock`, `container` or `none`. Null for a chat without a project. */
+  sandbox: string | null;
+  /** The sandbox in one sentence, as the daemon describes it. */
+  sandboxDetail: string | null;
+  /** Steps that prepared the worktree before any agent started: copied files and the project's setup command. */
+  setup: ToolItem[];
   blocks: AgentBlock[];
   /** Running total while the run is live, final total once it is over. */
   usage: Usage | null;
@@ -73,7 +79,7 @@ export interface Timeline {
 }
 
 export function emptyTimeline(): Timeline {
-  return { lastSeq: 0, prompt: "", status: "queued", error: null, hasWorkspace: false, dirtyCheckout: false, blocks: [], usage: null, rollbacks: [], changes: 0 };
+  return { lastSeq: 0, prompt: "", status: "queued", error: null, hasWorkspace: false, dirtyCheckout: false, sandbox: null, sandboxDetail: null, setup: [], blocks: [], usage: null, rollbacks: [], changes: 0 };
 }
 
 function lastBlock(t: Timeline, agentId: string | null): AgentBlock | undefined {
@@ -101,6 +107,8 @@ export function applyEvent(t: Timeline, ev: Event): Timeline {
       next.status = "running";
       next.hasWorkspace = Boolean(p.has_workspace);
       next.dirtyCheckout = Boolean(p.uncommitted_changes_not_included);
+      next.sandbox = typeof p.sandbox === "string" ? p.sandbox : null;
+      next.sandboxDetail = typeof p.sandbox_detail === "string" ? p.sandbox_detail : null;
       break;
     case "agent_started":
       next.blocks.push({
@@ -136,7 +144,10 @@ export function applyEvent(t: Timeline, ev: Event): Timeline {
       if (block) block.reasoning += String(p.text ?? "");
       break;
     case "tool_call":
-      if (block) {
+      if (ev.agent_id === null) {
+        // Worktree preparation belongs to no agent.
+        next.setup = [...next.setup, { kind: "tool", id: String(p.id), name: String(p.name ?? ""), args: p.args ?? {}, diff: null, state: "running", result: null, artifact: null, approval: null }];
+      } else if (block) {
         block.items = [...block.items, { kind: "tool", id: String(p.id), name: String(p.name ?? ""), args: p.args ?? {}, diff: null, state: "running", result: null, artifact: null, approval: null }];
         block.pending = "";
       }
@@ -154,6 +165,10 @@ export function applyEvent(t: Timeline, ev: Event): Timeline {
       next.status = "running";
       break;
     case "tool_result":
+      if (ev.agent_id === null) {
+        next.setup = next.setup.map((i) => (i.id === p.id ? { ...i, state: p.is_error ? "failed" : "done", result: String(p.content ?? ""), artifact: p.artifact ?? null } : i));
+        break;
+      }
       updateTool(block, p.id, (i) => ({
         ...i,
         state: i.state === "denied" ? "denied" : p.is_error ? "failed" : "done",
@@ -200,6 +215,8 @@ export function applyEvent(t: Timeline, ev: Event): Timeline {
       for (const b of next.blocks) {
         b.items = b.items.map((i) => (i.kind === "tool" && i.approval?.state === "pending" ? { ...i, state: "failed", approval: { ...i.approval, state: "expired" } } : i));
       }
+      // A setup step that was cut short by the end of the run did not finish.
+      next.setup = next.setup.map((i) => (i.state === "running" ? { ...i, state: "failed" } : i));
       next.changes += 1;
       break;
   }
